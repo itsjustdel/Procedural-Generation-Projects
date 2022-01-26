@@ -2,7 +2,7 @@
 ## A collection of programs that create all assets at runtime. 
 Click titles to navigate to the repositories where you can find more media/insights
 
-### [Online Fighting Game Prototype - "Swipe"](https://github.com/itsjustdel/Swipe-Game)
+### [Swipe - Online Fighting Game Prototype](https://github.com/itsjustdel/Swipe-Game)
 <img src="https://pbs.twimg.com/media/D3_84G8X4AAxvvV?format=jpg&name=small" width=600px/>
 
 ### [City Generator](https://github.com/itsjustdel/City-Generator)
