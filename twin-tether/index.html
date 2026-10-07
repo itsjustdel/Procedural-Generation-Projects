@@ -238,17 +238,31 @@ const CFG = {
     mass: 400, length: 4.2, radius: 0.62, spacing: 3.4,
     thrust: 14000,                 // per engine at full throttle
     spoolUp: 3.0, spoolDown: 4.5,  // throttle change per second
-    hoverHeight: 1.7, hoverK: 26000, hoverC: 2600, suction: 2200, rayLen: 6,
+    hoverHeight: 1.7,
     drag: 1.0,                     // quadratic air drag
     keel: 2600,                    // sideways grip (linear drag on lateral velocity)
-    uprightK: 9000, uprightC: 2200, yawC: 500,
+    yawC: 500,
+  },
+  // Repulsor hover (Star Wars style): cancels gravity, then steers each body toward
+  // ride height above a smoothed patch of ground with a critically damped controller.
+  // Bumps smaller than the footprint and faster than the smoothing barely register.
+  repulsor: {
+    freq: 1.3,        // Hz, how quickly ride height is restored
+    damping: 1.0,     // 1 = critically damped, no bounce
+    footprint: 3.0,   // m, radius of the ground patch each body senses
+    smoothing: 0.12,  // s, low-pass on the sensed ground height
+    lookahead: 0.15,  // s, sense the ground where the body will be this far ahead
+    range: 6,         // m above ride height where the field fades to nothing (so you can catch air)
+    maxG: 4,          // strongest push, in multiples of the body's weight
+    tiltFreq: 1.6,    // Hz, how quickly the body levels to the ground
+    tiltDamping: 1.0,
   },
   binder: { k: 200000, c: 4000,    // springs holding the two engines together
             yawDrag: 2600 },       // resists the pair spinning: sets max turn rate and how quickly a turn settles
   pod: {
     mass: 260, length: 2.6, radius: 0.85, anchorX: 0.45,
-    hoverHeight: 1.5, hoverK: 16000, hoverC: 1800, suction: 1500,
-    drag: 0.3, keel: 700, uprightK: 5000, uprightC: 1200,
+    hoverHeight: 1.5,
+    drag: 0.3, keel: 700,
   },
   tether: { length: 7.2, k: 50000, c: 2500 },
   land: { size: 3000, segments: 200, hills: 28, bumps: 3.5, rim: 140 },
@@ -482,6 +496,7 @@ class Racer {
     this.engines[0].teleport(at(-R.x * E.spacing / 2, -R.z * E.spacing / 2, E.hoverHeight), q);
     this.engines[1].teleport(at(R.x * E.spacing / 2, R.z * E.spacing / 2, E.hoverHeight), q);
     this.pod.teleport(at(-T.x * podBack, -T.z * podBack, Pd.hoverHeight), q);
+    for (const b of [...this.engines, this.pod]) b.hover = null;
     this.throttle = [0, 0];
   }
 
@@ -494,35 +509,69 @@ class Racer {
   }
 
   // Raycast springs along the body's own down axis. Returns averaged ground normal or null.
-  hover(body, localPts, h, K, C, suction) {
-    const { u } = this.axes(body);
-    const down = u.clone().negate();
-    const n = new THREE.Vector3();
-    const p = new THREE.Vector3(), vp = new THREE.Vector3(), F = new THREE.Vector3();
-    let hits = 0;
-    for (const lp of localPts) {
-      this.worldPoint(body, lp, p);
-      const hit = this.phys.raycast(p, down, CFG.engine.rayLen);
-      if (!hit || hit.distance > h + 1.6) continue;
-      const d = hit.distance;
-      const vn = body.pointVelocity(p, vp).dot(u);
-      let f = K * (h - d) - C * vn;
-      if (d > h) f = Math.max(f, -suction * (1 - (d - h) / 1.6));
-      f = Math.min(f, K * 4);
-      body.force(F.copy(u).multiplyScalar(f), p);
+  // Repulsor: sense the ground under a patch around the body (world-down rays),
+  // low-pass it, then apply exactly the force that cancels gravity plus a
+  // critically damped pull toward ride height. Force acts at the centre of mass,
+  // so it never twists the body; levelling is handled separately below.
+  repulsor(body, rideHeight, mass, dt) {
+    const Rp = CFG.repulsor;
+    const f = new THREE.Vector3(0, 0, 1).applyQuaternion(body.q).setY(0);
+    if (f.lengthSq() < 1e-4) f.set(0, 0, 1);
+    f.normalize();
+    const r = new THREE.Vector3(-f.z, 0, f.x);
+    const offsets = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]];
+    const down = new THREE.Vector3(0, -1, 0), o = new THREE.Vector3();
+    const reach = rideHeight + Rp.range + 3;
+    let hSum = 0, hits = 0; const n = new THREE.Vector3();
+    const lead = new THREE.Vector3(body.v.x, 0, body.v.z).multiplyScalar(Rp.lookahead);
+    for (const [a, b] of offsets) {
+      o.copy(body.p).add(lead).addScaledVector(f, a * Rp.footprint).addScaledVector(r, b * Rp.footprint);
+      o.y += 2;
+      const hit = this.phys.raycast(o, down, reach);
+      if (!hit) continue;
+      const gy = o.y - hit.distance;
+      hSum += gy; hits++;
       n.add(hit.normal);
-      hits++;
-      this.hoverRays.push([p.clone(), p.clone().addScaledVector(down, d)]);
+      this.hoverRays.push([o.clone(), o.clone().setY(gy)]);
     }
-    return hits ? n.normalize() : null;
+    const st = body.hover || (body.hover = { ground: null, rate: 0, normal: UP.clone() });
+    if (!hits) { st.ground = null; st.rate = 0; return null; }
+    const ground = hSum / hits;
+    n.normalize();
+    // smooth the sensed ground so individual bumps don't kick the body,
+    // and track how fast it is rising so the body follows slopes instead of lagging
+    const k = 1 - Math.exp(-dt / Rp.smoothing);
+    if (st.ground == null) { st.ground = ground; st.rate = 0; }
+    else {
+      const prev = st.ground;
+      st.ground += (ground - st.ground) * k;
+      st.rate += ((st.ground - prev) / dt - st.rate) * k;
+    }
+    st.normal.lerp(n, k).normalize();
+    const agl = body.p.y - st.ground;
+    const strength = 1 - smoothstep(rideHeight + Rp.range * 0.4, rideHeight + Rp.range, agl);
+    if (strength <= 0) return null;
+    const w = 2 * Math.PI * Rp.freq;
+    const accel = w * w * (rideHeight - agl) - 2 * Rp.damping * w * (body.v.y - st.rate);
+    const F = mass * (CFG.gravity + accel) * strength;
+    body.force(new THREE.Vector3(0, Math.max(0, Math.min(F, mass * CFG.gravity * Rp.maxG)), 0));
+    return st.normal;
   }
 
-  upright(body, n, K, C, yawC) {
-    const { u } = this.axes(body);
-    const axis = new THREE.Vector3().crossVectors(u, n);
-    const wPar = u.clone().multiplyScalar(body.w.dot(u));
-    const wPerp = body.w.clone().sub(wPar);
-    body.torque(axis.multiplyScalar(K).addScaledVector(wPerp, -C).addScaledVector(wPar, -yawC));
+  // Level the body to the (smoothed) ground normal, critically damped per axis.
+  // Uses a capsule's inertia so roll and pitch respond the same way.
+  level(body, n, mass, length, radius, yawC, strength = 1) {
+    const Rp = CFG.repulsor;
+    const { f, u } = this.axes(body);
+    const r = new THREE.Vector3().crossVectors(f, u);
+    const err = new THREE.Vector3().crossVectors(u, n);   // rotation axis * sin(angle)
+    const w0 = 2 * Math.PI * Rp.tiltFreq;
+    const alpha = err.multiplyScalar(w0 * w0 * strength).addScaledVector(body.w, -2 * Rp.tiltDamping * w0);
+    const Iroll = 0.5 * mass * radius * radius;
+    const Ipitch = mass * (length * length / 12 + radius * radius / 4);
+    const T = f.clone().multiplyScalar(alpha.dot(f) * Iroll).addScaledVector(r, alpha.dot(r) * Ipitch);
+    T.addScaledVector(u, -yawC * body.w.dot(u));
+    body.torque(T);
   }
 
   aero(body, dragK, keel) {
@@ -558,14 +607,13 @@ class Racer {
       const d = input[k] - this.throttle[k];
       this.throttle[k] += Math.max(-E.spoolDown * dt, Math.min(E.spoolUp * dt, d));
     }
-    const hoverPts = [new THREE.Vector3(0, 0, E.length * 0.38), new THREE.Vector3(0, 0, -E.length * 0.38)];
     this.grounded = 0;
     this.engines.forEach((b, k) => {
       const { f } = this.axes(b);
       if (thrustOn) b.force(f.multiplyScalar(E.thrust * this.throttle[k]));
-      const n = this.hover(b, hoverPts, E.hoverHeight, E.hoverK, E.hoverC, E.suction);
+      const n = this.repulsor(b, E.hoverHeight, E.mass, dt);
       if (n) this.grounded++;
-      this.upright(b, n || UP, n ? E.uprightK : E.uprightK * 0.3, E.uprightC, E.yawC);
+      this.level(b, n || UP, E.mass, E.length, E.radius, E.yawC, n ? 1 : 0.3);
       this.aero(b, E.drag, n ? E.keel : E.keel * 0.2);
     });
     // Binder: a springy quad (front, rear and both diagonals) keeps the engines parallel
@@ -587,9 +635,8 @@ class Racer {
       this.tension[k] = this.spring(this.engines[k], this.aRear, this.pod, this.podAnchors[k], Tt.length, Tt.k, Tt.c, true);
     }
     // Pod
-    const podPts = [new THREE.Vector3(0, 0, Pd.length * 0.3), new THREE.Vector3(0, 0, -Pd.length * 0.3)];
-    const pn = this.hover(this.pod, podPts, Pd.hoverHeight, Pd.hoverK, Pd.hoverC, Pd.suction);
-    this.upright(this.pod, pn || UP, pn ? Pd.uprightK : Pd.uprightK * 0.3, Pd.uprightC, 200);
+    const pn = this.repulsor(this.pod, Pd.hoverHeight, Pd.mass, dt);
+    this.level(this.pod, pn || UP, Pd.mass, Pd.length, Pd.radius, 200, pn ? 1 : 0.3);
     this.aero(this.pod, Pd.drag, pn ? Pd.keel : Pd.keel * 0.2);
   }
 
@@ -890,13 +937,29 @@ function frame(now) {
 // Debug hook for automated testing: step the simulation without rendering.
 window.__ttDebug = {
   get land() { return land; },
+  cfg: CFG,
   newLand(seed) { newLand(seed); },
   sim(seconds, controller) {
     if (game.state !== 'driving') startDriving();
     const steps = Math.round(seconds / CFG.dt), log = [];
+    // ride-quality stats: pitch/roll rate and vertical acceleration of each body
+    const bodies = [...racer.engines, racer.pod], prevVy = bodies.map(b => b.v.y);
+    let rate2 = 0, acc2 = 0, n = 0, aglMin = Infinity, aglMax = -Infinity, scrapes = 0;
+    const aLow = bodies.map(() => 0), kLow = 1 - Math.exp(-CFG.dt / 0.3);
     for (let i = 0; i < steps; i++) {
       inputOverride = controller ? controller(racer, i * CFG.dt) : [1, 1];
       fixedUpdate(CFG.dt);
+      bodies.forEach((b, k) => {
+        const u = new THREE.Vector3(0, 1, 0).applyQuaternion(b.q);
+        const wPerp = b.w.clone().addScaledVector(u, -b.w.dot(u));
+        rate2 += wPerp.lengthSq();
+        const a = (b.v.y - prevVy[k]) / CFG.dt; prevVy[k] = b.v.y;
+        aLow[k] += (a - aLow[k]) * kLow;          // keep only the jolts, not hill-following
+        acc2 += (a - aLow[k]) ** 2; n++;
+        const rad = k < 2 ? CFG.engine.radius : CFG.pod.radius;
+        if (b.p.y - land.height(b.p.x, b.p.z) < rad + 0.05) scrapes++;
+      });
+      { const c = racer.center(), agl = c.y - land.height(c.x, c.z); aglMin = Math.min(aglMin, agl); aglMax = Math.max(aglMax, agl); }
       if (i % 60 === 0) {
         const c = racer.center();
         log.push({ t: +(i * CFG.dt).toFixed(1), spd: +racer.speed().toFixed(1), x: +c.x.toFixed(0), z: +c.z.toFixed(0),
@@ -904,7 +967,7 @@ window.__ttDebug = {
       }
     }
     inputOverride = null;
-    return { log };
+    return { log, rmsRate: Math.sqrt(rate2 / n), rmsVertAcc: Math.sqrt(acc2 / n), aglMin, aglMax, scrapeFrac: scrapes / n };
   },
 };
 
