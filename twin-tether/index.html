@@ -1,0 +1,1306 @@
+<title>Twin Tether</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800;900&family=Barlow+Semi+Condensed:wght@400;500;600&display=swap">
+<style>
+/* Layout: full-bleed WebGL canvas. HUD sits in the four corners; the two throttle
+   columns at the bottom double as touch pads. One committed dusk-desert look. */
+:root {
+  --umber: #160e0b;
+  --bone: #f5e8d4;
+  --heat: #ff7a2c;
+  --plasma: #7fdcff;
+  --dust: #b29a85;
+  --glass: rgba(24, 15, 11, 0.62);
+  --line: rgba(245, 232, 212, 0.16);
+  --display: "Big Shoulders Display", "Arial Narrow", Impact, sans-serif;
+  --body: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  color-scheme: dark;
+}
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  background: var(--umber);
+  color: var(--bone);
+  font-family: var(--body);
+  font-size: 15px;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+#app { position: fixed; inset: 0; }
+#app canvas { display: block; width: 100%; height: 100%; }
+
+.hud { position: fixed; inset: 0; pointer-events: none; font-variant-numeric: tabular-nums; }
+.lbl {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dust);
+}
+.corner { position: absolute; display: grid; gap: 2px; }
+.tl { top: calc(14px + env(safe-area-inset-top, 0px)); left: 16px; }
+.tr { top: calc(10px + env(safe-area-inset-top, 0px)); right: 16px; text-align: right; }
+.lapnum { font-family: var(--display); font-weight: 800; font-size: 34px; line-height: 1; }
+.lapnum small { font-size: 18px; color: var(--dust); font-weight: 600; }
+.num { font-family: var(--display); font-weight: 600; font-size: 22px; line-height: 1.05; margin-bottom: 6px; }
+.speed { font-family: var(--display); font-weight: 900; font-size: 64px; line-height: 0.9; }
+.speed-unit { margin-top: 2px; }
+.tl, .tr { text-shadow: 0 1px 2px rgba(0,0,0,0.7), 0 0 14px rgba(0,0,0,0.45); }
+.tl .lbl, .tr .lbl { color: var(--bone); opacity: 0.8; }
+.hud::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 150px;
+  background: linear-gradient(to bottom, rgba(22,14,11,0.45), rgba(22,14,11,0));
+}
+
+#msg {
+  position: absolute; left: 0; right: 0; top: 30%;
+  text-align: center;
+  font-family: var(--display); font-weight: 900;
+  font-size: clamp(56px, 14vw, 140px);
+  letter-spacing: 0.02em;
+  color: var(--bone);
+  text-shadow: 0 4px 30px rgba(255, 122, 44, 0.55);
+}
+#msg.warn { color: var(--heat); font-size: clamp(36px, 8vw, 72px); }
+
+.pad {
+  position: absolute;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  pointer-events: auto;
+  display: grid; justify-items: center; gap: 6px;
+  background: none; border: 0; color: inherit; font: inherit;
+  padding: 8px; border-radius: 14px;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.pad.left { left: 8px; }
+.pad.right { right: 8px; }
+.pad:focus-visible { outline: 2px solid var(--plasma); }
+.bar {
+  width: 22px; height: 150px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  border-radius: 4px;
+  position: relative; overflow: hidden;
+}
+.bar i {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 0%;
+  background: linear-gradient(to top, #c2410c, var(--heat) 60%, #ffd2a8);
+  box-shadow: 0 0 16px var(--heat);
+}
+.key {
+  font-family: var(--display); font-weight: 800; font-size: 18px;
+  border: 1px solid var(--line); background: var(--glass);
+  border-radius: 6px; padding: 1px 8px;
+}
+@media (pointer: coarse) {
+  .pad { width: 44vw; height: 46vh; align-content: end; padding-bottom: 12px; }
+  .pad.left { left: 0; }
+  .pad.right { right: 0; }
+  .pad .key { display: none; }
+  .bar { height: 120px; width: 26px; }
+}
+
+.panel {
+  position: fixed; inset: 0;
+  display: grid; place-items: center;
+  padding-inline: 16px;
+  background: radial-gradient(ellipse at 50% 60%, rgba(22,14,11,0.15), rgba(22,14,11,0.7));
+  z-index: 5;
+}
+.card {
+  width: 100%; max-width: 460px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 22px 22px 20px;
+  display: grid; gap: 14px;
+  max-height: calc(100% - 32px); overflow: auto;
+}
+.eyebrow { font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--heat); }
+h1 {
+  margin: 0;
+  font-family: var(--display); font-weight: 900;
+  font-size: 56px; line-height: 0.9; letter-spacing: 0.01em;
+  text-transform: uppercase;
+  text-wrap: balance;
+}
+h2 { margin: 0; font-family: var(--display); font-weight: 800; font-size: 40px; line-height: 0.95; text-transform: uppercase; }
+.card p { margin: 0; line-height: 1.45; color: #e6d6c0; max-width: 60ch; }
+.rig { width: 100%; height: auto; display: block; }
+.controls { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; font-size: 14px; }
+.controls dt { font-family: var(--display); font-weight: 800; font-size: 16px; color: var(--bone); }
+.controls dd { margin: 0; color: #d9c7b0; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; }
+.btn {
+  font: 600 16px/1 var(--body); letter-spacing: 0.04em;
+  padding: 12px 18px; border-radius: 10px;
+  border: 1px solid var(--line); background: rgba(245,232,212,0.06); color: var(--bone);
+  cursor: pointer;
+}
+.btn:hover { background: rgba(245,232,212,0.12); }
+.btn:focus-visible { outline: 2px solid var(--plasma); outline-offset: 2px; }
+.btn.go { background: var(--heat); border-color: var(--heat); color: #1c0f08; font-weight: 700; }
+.btn.go:hover { background: #ff8f4d; }
+.laps { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 12px; font-variant-numeric: tabular-nums; }
+.laps .t { font-family: var(--display); font-weight: 600; font-size: 20px; text-align: right; }
+.laps .pb { color: var(--plasma); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; align-self: center; }
+.total { font-family: var(--display); font-weight: 900; font-size: 48px; line-height: 1; }
+#loading { position: fixed; inset: 0; display: grid; place-items: center; font-family: var(--display); font-size: 28px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dust); }
+@media (max-width: 420px) { h1 { font-size: 46px; } .speed { font-size: 52px; } }
+</style>
+
+<div id="app"></div>
+<div id="loading">Spooling engines…</div>
+
+<div class="hud" id="hud" hidden>
+  <div class="corner tl">
+    <div class="lbl">Lap</div>
+    <div class="lapnum"><span id="lap">1</span><small>/<span id="lapsTotal">3</span></small></div>
+    <div class="lbl">Time</div>
+    <div class="num" id="time">0:00.000</div>
+    <div class="lbl">Best lap</div>
+    <div class="num" id="best">–</div>
+  </div>
+  <div class="corner tr">
+    <div class="speed" id="speed">0</div>
+    <div class="lbl speed-unit">km/h</div>
+  </div>
+  <div id="msg"></div>
+  <button class="pad left" id="padL" aria-label="Left engine">
+    <div class="bar"><i id="barL"></i></div>
+    <span class="key">A</span>
+    <span class="lbl">Left</span>
+  </button>
+  <button class="pad right" id="padR" aria-label="Right engine">
+    <div class="bar"><i id="barR"></i></div>
+    <span class="key">D</span>
+    <span class="lbl">Right</span>
+  </button>
+</div>
+
+<div class="panel" id="menu" hidden>
+  <div class="card">
+    <div class="eyebrow" id="trackInfo">Track 7</div>
+    <h1>Twin Tether</h1>
+    <svg class="rig" viewBox="0 0 400 120" role="img" aria-label="Two engines pull a pod on cables. Easing off the left engine swings the rig left.">
+      <g fill="none" stroke-linecap="round">
+        <line x1="150" y1="22" x2="250" y2="22" stroke="#7fdcff" stroke-width="2" stroke-dasharray="4 4"/>
+        <line x1="150" y1="78" x2="194" y2="104" stroke="#b29a85" stroke-width="2"/>
+        <line x1="250" y1="78" x2="206" y2="104" stroke="#b29a85" stroke-width="2"/>
+      </g>
+      <rect x="138" y="14" width="24" height="64" rx="11" fill="#6c5a4b" stroke="#f5e8d4" stroke-opacity=".5"/>
+      <rect x="238" y="14" width="24" height="64" rx="11" fill="#6c5a4b" stroke="#f5e8d4" stroke-opacity=".5"/>
+      <path d="M143 80 L150 92 L157 80 Z" fill="#ff7a2c" opacity=".35"/>
+      <path d="M243 80 L250 112 L257 80 Z" fill="#ff7a2c"/>
+      <ellipse cx="200" cy="108" rx="14" ry="9" fill="#8a7462" stroke="#f5e8d4" stroke-opacity=".5"/>
+      <path d="M118 50 C 96 50, 84 36, 84 20" fill="none" stroke="#f5e8d4" stroke-width="2"/>
+      <path d="M78 26 L84 16 L90 26" fill="none" stroke="#f5e8d4" stroke-width="2"/>
+      <text x="150" y="104" fill="#b29a85" font-size="12" text-anchor="middle" font-family="Barlow Semi Condensed, sans-serif">L 20%</text>
+      <text x="282" y="104" fill="#ff7a2c" font-size="12" text-anchor="start" font-family="Barlow Semi Condensed, sans-serif">R 100%</text>
+      <text x="40" y="60" fill="#f5e8d4" font-size="12" font-family="Barlow Semi Condensed, sans-serif">turns left</text>
+    </svg>
+    <p>Two engines, two cables, one pod. Engine power is the only control. Hold both for full thrust, and ease off one side to swing toward it.</p>
+    <dl class="controls">
+      <dt>Left engine</dt><dd>A or ←, left trigger, left side of screen</dd>
+      <dt>Right engine</dt><dd>D or →, right trigger, right side of screen</dd>
+      <dt>R / M</dt><dd>Put the rig back on the track / mute engines</dd>
+    </dl>
+    <div class="row">
+      <button class="btn go" id="startBtn">Start race</button>
+      <button class="btn" id="newTrackBtn">New track</button>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="results" hidden>
+  <div class="card">
+    <div class="eyebrow" id="resTrack">Track 7</div>
+    <h2>Finished</h2>
+    <div>
+      <div class="lbl">Race time</div>
+      <div class="total" id="resTotal">0:00.000</div>
+    </div>
+    <div class="laps" id="resLaps"></div>
+    <div class="row">
+      <button class="btn go" id="againBtn">Race again</button>
+      <button class="btn" id="newTrackBtn2">New track</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js';
+import RAPIER from 'https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js';
+
+// ---------------------------------------------------------------------------
+// Tuning. Everything that shapes the handling lives here.
+// Units: metres, kilograms, seconds, newtons.
+// ---------------------------------------------------------------------------
+const CFG = {
+  gravity: 18,
+  dt: 1 / 120,
+  laps: 3,
+  engine: {
+    mass: 400, length: 4.2, radius: 0.62, spacing: 3.4,
+    thrust: 14000,                 // per engine at full throttle
+    spoolUp: 3.0, spoolDown: 4.5,  // throttle change per second
+    hoverHeight: 1.7, hoverK: 26000, hoverC: 2600, suction: 2200, rayLen: 6,
+    drag: 1.0,                     // quadratic air drag
+    keel: 2600,                    // sideways grip (linear drag on lateral velocity)
+    uprightK: 9000, uprightC: 2200, yawC: 500,
+  },
+  binder: { k: 200000, c: 4000,    // springs holding the two engines together
+            yawDrag: 2600 },       // resists the pair spinning: sets max turn rate and how quickly a turn settles
+  pod: {
+    mass: 260, length: 2.6, radius: 0.85, anchorX: 0.45,
+    hoverHeight: 1.5, hoverK: 16000, hoverC: 1800, suction: 1500,
+    drag: 0.3, keel: 700, uprightK: 5000, uprightC: 1200,
+  },
+  tether: { length: 7.2, k: 50000, c: 2500 },
+  track: { width: 26, wall: 2.6, samples: 1400 },
+};
+
+// Collision groups: (membership << 16) | filter
+const G_STATIC = (0x0001 << 16) | 0xffff;
+const G_VEHICLE = (0x0002 << 16) | 0x0001; // vehicle parts hit the world, never each other
+const G_RAY = (0x0002 << 16) | 0x0001;     // hover rays only see the world
+
+// ---------------------------------------------------------------------------
+// Physics adapter. This is the only code that talks to Rapier. The racer only
+// needs: bodies with pose/velocity, force at a point, torque, raycast, step.
+// Porting to another engine means rewriting this block.
+// ---------------------------------------------------------------------------
+class Body {
+  constructor(phys, rb) {
+    this.phys = phys; this.rb = rb;
+    this.p = new THREE.Vector3(); this.q = new THREE.Quaternion();
+    this.v = new THREE.Vector3(); this.w = new THREE.Vector3();
+    this.sync();
+  }
+  sync() {
+    const t = this.rb.translation(), r = this.rb.rotation();
+    const v = this.rb.linvel(), w = this.rb.angvel();
+    this.p.set(t.x, t.y, t.z); this.q.set(r.x, r.y, r.z, r.w);
+    this.v.set(v.x, v.y, v.z); this.w.set(w.x, w.y, w.z);
+  }
+  force(F, at) {
+    const dt = this.phys.dt;
+    const imp = { x: F.x * dt, y: F.y * dt, z: F.z * dt };
+    if (at) this.rb.applyImpulseAtPoint(imp, { x: at.x, y: at.y, z: at.z }, true);
+    else this.rb.applyImpulse(imp, true);
+  }
+  torque(T) {
+    const dt = this.phys.dt;
+    this.rb.applyTorqueImpulse({ x: T.x * dt, y: T.y * dt, z: T.z * dt }, true);
+  }
+  pointVelocity(pt, out) {
+    return out.subVectors(pt, this.p).cross(this.w).negate().add(this.v); // v + w × r
+  }
+  teleport(pos, quat) {
+    this.rb.setTranslation({ x: pos.x, y: pos.y, z: pos.z }, true);
+    this.rb.setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w }, true);
+    this.rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    this.rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.sync();
+  }
+}
+
+class Physics {
+  static async create() {
+    await RAPIER.init();
+    const p = new Physics();
+    p.world = new RAPIER.World({ x: 0, y: -CFG.gravity, z: 0 });
+    p.world.timestep = CFG.dt;
+    p.dt = CFG.dt;
+    p.bodies = [];
+    p.ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+    return p;
+  }
+  addStaticMesh(vertices, indices) {
+    const desc = RAPIER.ColliderDesc.trimesh(vertices, indices)
+      .setCollisionGroups(G_STATIC).setFriction(0.15).setRestitution(0.25);
+    return this.world.createCollider(desc);
+  }
+  removeStatic(collider) { this.world.removeCollider(collider, false); }
+  // Capsule whose long axis is local Z (forward).
+  addCapsule({ mass, length, radius }) {
+    const rb = this.world.createRigidBody(
+      RAPIER.RigidBodyDesc.dynamic().setCcdEnabled(true).setLinearDamping(0.02).setAngularDamping(0.6));
+    const half = Math.max(0.01, length / 2 - radius);
+    const desc = RAPIER.ColliderDesc.capsule(half, radius)
+      .setRotation({ x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 })
+      .setMass(mass).setFriction(0.1).setRestitution(0.35)
+      .setCollisionGroups(G_VEHICLE);
+    this.world.createCollider(desc, rb);
+    const b = new Body(this, rb);
+    this.bodies.push(b);
+    return b;
+  }
+  raycast(origin, dir, maxDist) {
+    this.ray.origin = { x: origin.x, y: origin.y, z: origin.z };
+    this.ray.dir = { x: dir.x, y: dir.y, z: dir.z };
+    const hit = this.world.castRayAndGetNormal(this.ray, maxDist, true, undefined, G_RAY);
+    if (!hit) return null;
+    return { distance: hit.timeOfImpact ?? hit.toi, normal: hit.normal };
+  }
+  step() {
+    this.world.step();
+    for (const b of this.bodies) b.sync();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers: seeded random, value noise
+// ---------------------------------------------------------------------------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function makeNoise(seed) {
+  const rand = mulberry32(seed);
+  const perm = new Uint8Array(256), vals = new Float32Array(256);
+  for (let i = 0; i < 256; i++) { perm[i] = i; vals[i] = rand(); }
+  for (let i = 255; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [perm[i], perm[j]] = [perm[j], perm[i]]; }
+  const at = (x, z) => vals[perm[(perm[x & 255] + z) & 255]];
+  const noise = (x, z) => {
+    const ix = Math.floor(x), iz = Math.floor(z);
+    const fx = x - ix, fz = z - iz;
+    const u = fx * fx * (3 - 2 * fx), w = fz * fz * (3 - 2 * fz);
+    const a = at(ix, iz), b = at(ix + 1, iz), c = at(ix, iz + 1), d = at(ix + 1, iz + 1);
+    return a + (b - a) * u + (c - a) * w + (a - b - c + d) * u * w;
+  };
+  return (x, z, oct = 4) => {
+    let s = 0, amp = 1, f = 1, norm = 0;
+    for (let o = 0; o < oct; o++) { s += amp * noise(x * f, z * f); norm += amp; amp *= 0.5; f *= 2.03; }
+    return s / norm;
+  };
+}
+const smoothstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const UP = new THREE.Vector3(0, 1, 0);
+function quatFromBasis(fwd, up, out = new THREE.Quaternion()) {
+  // local +Z = forward, +Y = up, +X = left
+  const left = new THREE.Vector3().crossVectors(up, fwd).normalize();
+  const m = new THREE.Matrix4().makeBasis(left, up, fwd);
+  return out.setFromRotationMatrix(m);
+}
+
+// ---------------------------------------------------------------------------
+// Renderer, scene, sky
+// ---------------------------------------------------------------------------
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const FOG = new THREE.Color('#e7a274');
+scene.fog = new THREE.Fog(FOG, 220, 1500);
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.3, 5000);
+
+const sunDir = new THREE.Vector3(0.55, 0.32, -0.62).normalize();
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(3500, 32, 16),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { sunDir: { value: sunDir } },
+    vertexShader: `varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `varying vec3 vDir; uniform vec3 sunDir;
+      void main(){
+        vec3 d = normalize(vDir);
+        float h = clamp(d.y, 0.0, 1.0);
+        vec3 hor = vec3(0.93, 0.62, 0.44);
+        vec3 zen = vec3(0.22, 0.33, 0.52);
+        vec3 col = mix(hor, zen, pow(h, 0.5));
+        float s = max(dot(d, sunDir), 0.0);
+        col += vec3(1.0, 0.82, 0.55) * pow(s, 900.0) * 2.0 + vec3(1.0, 0.55, 0.25) * pow(s, 10.0) * 0.3;
+        if (d.y < 0.0) col = hor;
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  })
+);
+sky.renderOrder = -1;
+scene.add(sky);
+
+scene.add(new THREE.HemisphereLight('#ffd8b4', '#5a3320', 0.9));
+const sun = new THREE.DirectionalLight('#ffd2a0', 2.6);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -45, right: 45, top: 45, bottom: -45, near: 10, far: 400 });
+sun.shadow.bias = -0.0005;
+scene.add(sun, sun.target);
+
+// ---------------------------------------------------------------------------
+// Procedural track: closed spline loop, banked by curvature, walls, canyon terrain
+// ---------------------------------------------------------------------------
+function roadTexture() {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 512;
+  const g = c.getContext('2d');
+  g.fillStyle = '#8a7462'; g.fillRect(0, 0, 256, 512);
+  const r = mulberry32(3);
+  for (let i = 0; i < 5000; i++) {
+    const v = 110 + r() * 60 | 0;
+    g.fillStyle = `rgba(${v + 20},${v},${v - 18},${0.25 + r() * 0.3})`;
+    g.fillRect(r() * 256, r() * 512, 1 + r() * 2, 1 + r() * 2);
+  }
+  for (let y = 0; y < 512; y += 64) { // rumble strips
+    g.fillStyle = '#c0462a'; g.fillRect(0, y, 10, 32); g.fillRect(246, y, 10, 32);
+    g.fillStyle = '#efe1cb'; g.fillRect(0, y + 32, 10, 32); g.fillRect(246, y + 32, 10, 32);
+  }
+  g.fillStyle = 'rgba(245,232,212,0.85)';
+  g.fillRect(16, 0, 4, 512); g.fillRect(236, 0, 4, 512);
+  for (let y = 0; y < 512; y += 128) g.fillRect(126, y, 4, 64);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return t;
+}
+function checkerTexture() {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 32;
+  const g = c.getContext('2d');
+  for (let x = 0; x < 16; x++) for (let y = 0; y < 2; y++) {
+    g.fillStyle = (x + y) % 2 ? '#111' : '#f3e7d5'; g.fillRect(x * 16, y * 16, 16, 16);
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const ROAD_TEX = roadTexture();
+const CHECKER_TEX = checkerTexture();
+
+function buildTrack(seed, phys) {
+  const rand = mulberry32(seed * 9973 + 17);
+  const fbm = makeNoise(seed + 101);
+  const W = CFG.track.width, H = CFG.track.wall, M = CFG.track.samples;
+
+  // Control points around a wobbly circle (star-shaped, so the loop never crosses itself)
+  const N = 16, R = 520;
+  let radii = Array.from({ length: N }, () => 0.58 + 0.72 * rand());
+  radii = radii.map((r, i) => (r * 2 + radii[(i + 1) % N] + radii[(i + N - 1) % N]) / 4);
+  const pts = radii.map((r, i) => {
+    const a = (i / N) * Math.PI * 2 + (rand() - 0.5) * 0.5 * (Math.PI * 2 / N);
+    return new THREE.Vector3(Math.cos(a) * R * r, 0, Math.sin(a) * R * r);
+  });
+  const curve = new THREE.CatmullRomCurve3(pts, true, 'centripetal');
+  const P = curve.getSpacedPoints(M); P.pop();
+  const ph = [rand() * 6.283, rand() * 6.283, rand() * 6.283];
+  P.forEach((p, i) => {
+    const t = (i / M) * Math.PI * 2;
+    p.y = 40 + 14 * Math.sin(2 * t + ph[0]) + 7 * Math.sin(5 * t + ph[1]) + 3 * Math.sin(9 * t + ph[2]);
+  });
+
+  // Frames: tangent, banked up, right
+  const T = [], U = [], Rt = [], dist = [0];
+  for (let i = 0; i < M; i++) T.push(new THREE.Vector3().subVectors(P[(i + 1) % M], P[(i + M - 1) % M]).normalize());
+  for (let i = 1; i <= M; i++) dist.push(dist[i - 1] + P[i % M].distanceTo(P[i - 1]));
+  const length = dist[M], ds = length / M;
+  let lean = T.map((_, i) => {
+    const d = new THREE.Vector3().subVectors(T[(i + 1) % M], T[(i + M - 1) % M]); d.y = 0;
+    const k = d.length() / (2 * ds);
+    return k < 1e-6 ? new THREE.Vector3() : d.normalize().multiplyScalar(Math.min(k * 30, 0.45));
+  });
+  for (let pass = 0; pass < 3; pass++) {
+    lean = lean.map((_, i) => {
+      const s = new THREE.Vector3();
+      for (let j = -10; j <= 10; j++) s.add(lean[(i + j + M) % M]);
+      return s.multiplyScalar(1 / 21);
+    });
+  }
+  for (let i = 0; i < M; i++) {
+    const u = UP.clone().add(lean[i]).normalize();
+    const r = new THREE.Vector3().crossVectors(T[i], u).normalize();
+    U.push(new THREE.Vector3().crossVectors(r, T[i]).normalize());
+    Rt.push(r);
+  }
+
+  const group = new THREE.Group();
+  const colliders = [];
+
+  // Strip builder: cols points per sample row, closed loop (last row repeats the first)
+  function strip(pointAt, cols, uvAt) {
+    const pos = [], uv = [], idx = [];
+    for (let i = 0; i <= M; i++) {
+      const s = i % M;
+      for (let c = 0; c < cols; c++) {
+        const p = pointAt(s, c); pos.push(p.x, p.y, p.z);
+        if (uvAt) uv.push(...uvAt(i, c));
+      }
+    }
+    for (let i = 0; i < M; i++) for (let c = 0; c < cols - 1; c++) {
+      const a = i * cols + c, b = a + 1, d = a + cols, e = d + 1;
+      idx.push(a, b, d, b, e, d); // faces along U (up out of the road)
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    if (uvAt) g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return g;
+  }
+  const tmp = new THREE.Vector3();
+  const edge = (s, side, up = 0, out = 0) =>
+    tmp.copy(P[s]).addScaledVector(Rt[s], side * (W / 2 + out)).addScaledVector(U[s], up).clone();
+
+  const roadGeo = strip((s, c) => edge(s, c ? 1 : -1), 2, (i, c) => [c, dist[i] / 34]);
+  const road = new THREE.Mesh(roadGeo, new THREE.MeshStandardMaterial({ map: ROAD_TEX, roughness: 0.92, metalness: 0 }));
+  road.receiveShadow = true;
+  group.add(road);
+
+  const wallMat = new THREE.MeshStandardMaterial({ color: '#a38b77', roughness: 0.85, side: THREE.DoubleSide });
+  const bandMat = new THREE.MeshBasicMaterial({ color: '#ff8a3d', side: THREE.DoubleSide, fog: true });
+  const wallGeos = [];
+  for (const side of [-1, 1]) {
+    const wg = strip((s, c) => edge(s, side, c ? H : -0.4, c ? 0.5 : 0), 2);
+    wallGeos.push(wg);
+    const wm = new THREE.Mesh(wg, wallMat); wm.receiveShadow = true; group.add(wm);
+    const bg = strip((s, c) => edge(s, side, c ? H + 0.22 : H - 0.05, c ? 0.53 : 0.49), 2);
+    group.add(new THREE.Mesh(bg, bandMat));
+  }
+
+  // One trimesh collider for road + both walls
+  {
+    const geos = [roadGeo, ...wallGeos];
+    let vcount = 0; geos.forEach(g => vcount += g.attributes.position.count);
+    const verts = new Float32Array(vcount * 3); const ids = [];
+    let off = 0;
+    for (const g of geos) {
+      verts.set(g.attributes.position.array, off * 3);
+      for (const i of g.index.array) ids.push(i + off);
+      off += g.attributes.position.count;
+    }
+    colliders.push(phys.addStaticMesh(verts, new Uint32Array(ids)));
+  }
+
+  // Canyon terrain: low under the track, rising into flat-topped mesas away from it
+  {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const p of P) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
+    const margin = 700, cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+    const size = Math.max(maxX - minX, maxZ - minZ) + margin * 2;
+    const n = 200, cell = size / n;
+    const geo = new THREE.PlaneGeometry(size, size, n, n); geo.rotateX(-Math.PI / 2);
+    const pos = geo.attributes.position;
+    const colors = new Float32Array(pos.count * 3);
+    const strata = ['#c98a5a', '#b5683f', '#dca877', '#a4573a', '#e2b98c'].map(c => new THREE.Color(c));
+    const sand = new THREE.Color('#c99a6e');
+    const col = new THREE.Color();
+    const step = 7;
+    for (let v = 0; v < pos.count; v++) {
+      const x = pos.getX(v) + cx, z = pos.getZ(v) + cz;
+      let best = Infinity, bi = 0;
+      for (let i = 0; i < M; i += step) { const dx = P[i].x - x, dz = P[i].z - z, d = dx * dx + dz * dz; if (d < best) { best = d; bi = i; } }
+      for (let j = -step; j <= step; j++) { const i = (bi + j + M) % M; const dx = P[i].x - x, dz = P[i].z - z, d = dx * dx + dz * dz; if (d < best) { best = d; bi = i; } }
+      const d = Math.sqrt(best), ty = P[bi].y;
+      const canyon = smoothstep(W / 2 + 14, W / 2 + 70, d);
+      const m = smoothstep(0.47, 0.56, fbm(x / 260, z / 260, 4));
+      const rough = fbm(x / 40, z / 40, 3);
+      const h = ty - 3 + canyon * (5 + 70 * m + 9 * rough) + (1 - canyon) * 0;
+      pos.setY(v, h);
+      if (canyon < 0.05) col.copy(sand);
+      else {
+        const band = Math.abs(Math.floor(h * 0.16 + rough * 1.6)) % strata.length;
+        col.copy(strata[band]).lerp(sand, 1 - canyon);
+      }
+      colors[v * 3] = col.r; colors[v * 3 + 1] = col.g; colors[v * 3 + 2] = col.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.translate(cx, 0, cz);
+    geo.computeVertexNormals();
+    const terrain = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 }));
+    terrain.receiveShadow = true;
+    group.add(terrain);
+    colliders.push(phys.addStaticMesh(new Float32Array(geo.attributes.position.array), new Uint32Array(geo.index.array)));
+  }
+
+  // Start gantry
+  {
+    const i = 0, q = quatFromBasis(T[i], U[i]);
+    const g = new THREE.Group(); g.position.copy(P[i]); g.quaternion.copy(q);
+    const metal = new THREE.MeshStandardMaterial({ color: '#3b2d25', roughness: 0.6, metalness: 0.5 });
+    for (const s of [-1, 1]) {
+      const pillar = new THREE.Mesh(new THREE.BoxGeometry(1.4, 12, 1.4), metal);
+      pillar.position.set(s * (W / 2 + 2), 6, 0); pillar.castShadow = true; g.add(pillar);
+    }
+    const banner = new THREE.Mesh(new THREE.BoxGeometry(W + 6, 2.2, 0.6),
+      [metal, metal, metal, metal, new THREE.MeshBasicMaterial({ map: CHECKER_TEX }), new THREE.MeshBasicMaterial({ map: CHECKER_TEX })]);
+    banner.position.y = 11; g.add(banner);
+    const line = new THREE.Mesh(new THREE.PlaneGeometry(W, 2), new THREE.MeshBasicMaterial({ map: CHECKER_TEX }));
+    line.rotation.x = -Math.PI / 2; line.position.y = 0.03; g.add(line);
+    group.add(g);
+  }
+
+  // Rock arches over the track as landmarks
+  {
+    const rock = new THREE.MeshStandardMaterial({ color: '#b0704a', roughness: 1, flatShading: true });
+    for (let k = 0; k < 4; k++) {
+      const i = Math.floor(((k + 0.5 + (rand() - 0.5) * 0.4) / 4) * M) % M;
+      const rad = W / 2 + 7 + rand() * 6;
+      const geo = new THREE.TorusGeometry(rad, 2.6 + rand() * 1.5, 7, 28, Math.PI);
+      const p = geo.attributes.position;
+      for (let v = 0; v < p.count; v++) {
+        const x = p.getX(v), y = p.getY(v), z = p.getZ(v);
+        const s = 1 + (fbm(x * 0.2 + k * 10, y * 0.2) - 0.5) * 0.9;
+        p.setXYZ(v, x * (1 + (s - 1) * 0.08), y * (1 + (s - 1) * 0.08), z * s);
+      }
+      geo.computeVertexNormals();
+      const arch = new THREE.Mesh(geo, rock);
+      arch.position.copy(P[i]).addScaledVector(U[i], -1);
+      const left = new THREE.Vector3().crossVectors(U[i], T[i]);
+      arch.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(left, U[i], T[i]));
+      arch.castShadow = true;
+      group.add(arch);
+    }
+  }
+
+  scene.add(group);
+  return {
+    seed, P, T, U, Rt, M, length, group, colliders,
+    dispose() {
+      scene.remove(group);
+      group.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+      colliders.forEach(c => phys.removeStatic(c));
+    },
+    nearest(pos, from, window) {
+      let best = Infinity, bi = from;
+      if (from == null) {
+        for (let i = 0; i < M; i++) { const d = P[i].distanceToSquared(pos); if (d < best) { best = d; bi = i; } }
+      } else {
+        for (let j = -window; j <= window; j++) { const i = (from + j + M) % M; const d = P[i].distanceToSquared(pos); if (d < best) { best = d; bi = i; } }
+      }
+      return bi;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The racer: two engine bodies, a binder between them, two tethers to the pod.
+// All of the pod-racer behaviour is forces computed here.
+// ---------------------------------------------------------------------------
+class Racer {
+  constructor(phys) {
+    const E = CFG.engine, Pd = CFG.pod;
+    this.phys = phys;
+    this.engines = [0, 1].map(() => phys.addCapsule({ mass: E.mass, length: E.length, radius: E.radius }));
+    this.pod = phys.addCapsule({ mass: Pd.mass, length: Pd.length, radius: Pd.radius });
+    this.throttle = [0, 0];
+    this.tension = [0, 0];
+    this.hoverHits = [];
+    // local anchor points (local +X is left)
+    this.aFront = new THREE.Vector3(0, 0, E.length / 2);
+    this.aRear = new THREE.Vector3(0, 0, -E.length / 2);
+    this.podAnchors = [new THREE.Vector3(Pd.anchorX, 0, Pd.length / 2), new THREE.Vector3(-Pd.anchorX, 0, Pd.length / 2)];
+    const s = E.spacing, L = E.length;
+    this.binderRest = [s, s, Math.hypot(s, L), Math.hypot(s, L)];
+    this.buildMeshes();
+  }
+
+  place(track, idx) {
+    const E = CFG.engine, Pd = CFG.pod, M = track.M;
+    const i = ((idx % M) + M) % M;
+    const P = track.P[i], T = track.T[i], U = track.U[i], R = track.Rt[i];
+    const q = quatFromBasis(T, U);
+    const base = P.clone().addScaledVector(U, E.hoverHeight);
+    this.engines[0].teleport(base.clone().addScaledVector(R, -E.spacing / 2), q);
+    this.engines[1].teleport(base.clone().addScaledVector(R, E.spacing / 2), q);
+    const lateral = E.spacing / 2 - Pd.anchorX;
+    const along = Math.sqrt((CFG.tether.length - 0.15) ** 2 - lateral ** 2);
+    const podPos = base.clone().addScaledVector(T, -(E.length / 2 + along + Pd.length / 2))
+      .addScaledVector(U, Pd.hoverHeight - E.hoverHeight);
+    this.pod.teleport(podPos, q);
+    this.throttle = [0, 0];
+  }
+
+  worldPoint(body, local, out) { return out.copy(local).applyQuaternion(body.q).add(body.p); }
+  axes(body) {
+    return {
+      f: new THREE.Vector3(0, 0, 1).applyQuaternion(body.q),
+      u: new THREE.Vector3(0, 1, 0).applyQuaternion(body.q),
+    };
+  }
+
+  // Raycast springs along the body's own down axis. Returns averaged ground normal or null.
+  hover(body, localPts, h, K, C, suction) {
+    const { u } = this.axes(body);
+    const down = u.clone().negate();
+    const n = new THREE.Vector3();
+    const p = new THREE.Vector3(), vp = new THREE.Vector3(), F = new THREE.Vector3();
+    let hits = 0;
+    for (const lp of localPts) {
+      this.worldPoint(body, lp, p);
+      const hit = this.phys.raycast(p, down, CFG.engine.rayLen);
+      if (!hit || hit.distance > h + 1.6) continue;
+      const d = hit.distance;
+      const vn = body.pointVelocity(p, vp).dot(u);
+      let f = K * (h - d) - C * vn;
+      if (d > h) f = Math.max(f, -suction * (1 - (d - h) / 1.6));
+      f = Math.min(f, K * 4);
+      body.force(F.copy(u).multiplyScalar(f), p);
+      n.add(hit.normal);
+      hits++;
+      if (this.hoverHits.length < 8) this.hoverHits.push(p.clone().addScaledVector(down, d));
+    }
+    return hits ? n.normalize() : null;
+  }
+
+  upright(body, n, K, C, yawC) {
+    const { u } = this.axes(body);
+    const axis = new THREE.Vector3().crossVectors(u, n);
+    const wPar = u.clone().multiplyScalar(body.w.dot(u));
+    const wPerp = body.w.clone().sub(wPar);
+    body.torque(axis.multiplyScalar(K).addScaledVector(wPerp, -C).addScaledVector(wPar, -yawC));
+  }
+
+  aero(body, dragK, keel) {
+    const { f, u } = this.axes(body);
+    const r = new THREE.Vector3().crossVectors(f, u);
+    const v = body.v, speed = v.length();
+    const F = v.clone().multiplyScalar(-dragK * speed);
+    F.addScaledVector(r, -keel * v.dot(r));
+    body.force(F);
+  }
+
+  // Spring between two anchor points. ropeOnly: only pulls when stretched.
+  spring(A, la, B, lb, rest, k, c, ropeOnly) {
+    const pa = this.worldPoint(A, la, new THREE.Vector3());
+    const pb = this.worldPoint(B, lb, new THREE.Vector3());
+    const d = pb.clone().sub(pa); const len = d.length();
+    if (len < 1e-6) return 0;
+    d.multiplyScalar(1 / len);
+    const x = len - rest;
+    if (ropeOnly && x <= 0) return 0;
+    const va = A.pointVelocity(pa, new THREE.Vector3()), vb = B.pointVelocity(pb, new THREE.Vector3());
+    let f = k * x + c * vb.sub(va).dot(d);
+    if (ropeOnly) f = Math.max(0, f);
+    A.force(d.clone().multiplyScalar(f), pa);
+    B.force(d.clone().multiplyScalar(-f), pb);
+    return f;
+  }
+
+  update(dt, input, thrustOn) {
+    const E = CFG.engine, Pd = CFG.pod, B = CFG.binder, Tt = CFG.tether;
+    this.hoverHits.length = 0;
+    for (let k = 0; k < 2; k++) {
+      const d = input[k] - this.throttle[k];
+      this.throttle[k] += Math.max(-E.spoolDown * dt, Math.min(E.spoolUp * dt, d));
+    }
+    const hoverPts = [new THREE.Vector3(0, 0, E.length * 0.38), new THREE.Vector3(0, 0, -E.length * 0.38)];
+    this.grounded = 0;
+    this.engines.forEach((b, k) => {
+      const { f } = this.axes(b);
+      if (thrustOn) b.force(f.multiplyScalar(E.thrust * this.throttle[k]));
+      const n = this.hover(b, hoverPts, E.hoverHeight, E.hoverK, E.hoverC, E.suction);
+      if (n) this.grounded++;
+      this.upright(b, n || UP, n ? E.uprightK : E.uprightK * 0.3, E.uprightC, E.yawC);
+      this.aero(b, E.drag, n ? E.keel : E.keel * 0.2);
+    });
+    // Binder: a springy quad (front, rear and both diagonals) keeps the engines parallel
+    const [L, R] = this.engines;
+    this.spring(L, this.aFront, R, this.aFront, this.binderRest[0], B.k, B.c);
+    this.spring(L, this.aRear, R, this.aRear, this.binderRest[1], B.k, B.c);
+    this.spring(L, this.aFront, R, this.aRear, this.binderRest[2], B.k, B.c);
+    this.spring(L, this.aRear, R, this.aFront, this.binderRest[3], B.k, B.c);
+    // Pair yaw drag: oppose the difference in forward speed between the engines
+    {
+      const f = this.forward(), vc = L.v.clone().add(R.v).multiplyScalar(0.5);
+      for (const e of this.engines) {
+        const rel = e.v.clone().sub(vc).dot(f);
+        e.force(f.clone().multiplyScalar(-B.yawDrag * rel));
+      }
+    }
+    // Tethers: ropes from each engine's tail to the pod's nose
+    for (let k = 0; k < 2; k++) {
+      this.tension[k] = this.spring(this.engines[k], this.aRear, this.pod, this.podAnchors[k], Tt.length, Tt.k, Tt.c, true);
+    }
+    // Pod
+    const podPts = [new THREE.Vector3(0, 0, Pd.length * 0.3), new THREE.Vector3(0, 0, -Pd.length * 0.3)];
+    const pn = this.hover(this.pod, podPts, Pd.hoverHeight, Pd.hoverK, Pd.hoverC, Pd.suction);
+    this.upright(this.pod, pn || UP, pn ? Pd.uprightK : Pd.uprightK * 0.3, Pd.uprightC, 200);
+    this.aero(this.pod, Pd.drag, pn ? Pd.keel : Pd.keel * 0.2);
+  }
+
+  center(out = new THREE.Vector3()) { return out.addVectors(this.engines[0].p, this.engines[1].p).multiplyScalar(0.5); }
+  forward(out = new THREE.Vector3()) {
+    const a = new THREE.Vector3(0, 0, 1).applyQuaternion(this.engines[0].q);
+    const b = new THREE.Vector3(0, 0, 1).applyQuaternion(this.engines[1].q);
+    return out.addVectors(a, b).normalize();
+  }
+  up(out = new THREE.Vector3()) {
+    const a = new THREE.Vector3(0, 1, 0).applyQuaternion(this.engines[0].q);
+    const b = new THREE.Vector3(0, 1, 0).applyQuaternion(this.engines[1].q);
+    return out.addVectors(a, b).normalize();
+  }
+  speed() { return (this.engines[0].v.length() + this.engines[1].v.length()) * 0.5; }
+
+  buildMeshes() {
+    const E = CFG.engine, Pd = CFG.pod;
+    const hull = new THREE.MeshStandardMaterial({ color: '#6e5c4d', roughness: 0.45, metalness: 0.65 });
+    const dark = new THREE.MeshStandardMaterial({ color: '#2a211c', roughness: 0.6, metalness: 0.5 });
+    const stripe = new THREE.MeshStandardMaterial({ color: '#ff7a2c', emissive: '#ff5a10', emissiveIntensity: 0.6, roughness: 0.5 });
+    this.engineMeshes = this.engines.map((_, k) => {
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.66, E.length * 0.82, 18).rotateX(Math.PI / 2), hull);
+      body.position.z = -0.1;
+      const intake = new THREE.Mesh(new THREE.TorusGeometry(0.66, 0.12, 8, 24), dark);
+      intake.position.z = E.length * 0.33;
+      const cowl = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 0.66, 0.9, 18, 1, true).rotateX(Math.PI / 2), hull);
+      cowl.position.z = E.length * 0.36; cowl.material = hull;
+      const band = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.62, 0.22, 18).rotateX(Math.PI / 2), stripe);
+      band.position.z = 0.2;
+      const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.52, 0.5, 16, 1, true).rotateX(Math.PI / 2), dark);
+      nozzle.position.z = -E.length * 0.47;
+      g.add(body, intake, cowl, band, nozzle);
+      for (let i = 0; i < 4; i++) {
+        const fin = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.9, 1.1), hull);
+        const a = Math.PI / 4 + i * Math.PI / 2;
+        fin.position.set(Math.cos(a) * 0.7, Math.sin(a) * 0.7, -E.length * 0.33);
+        fin.rotation.z = a - Math.PI / 2;
+        g.add(fin);
+      }
+      // Exhaust plume: additive cone that grows with throttle
+      const plume = new THREE.Mesh(
+        new THREE.ConeGeometry(0.42, 1, 16, 1, true).translate(0, -0.5, 0).rotateX(-Math.PI / 2).rotateY(Math.PI),
+        new THREE.MeshBasicMaterial({ color: '#ffa25a', transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+      plume.position.z = -E.length * 0.5;
+      const core = new THREE.Mesh(
+        new THREE.ConeGeometry(0.22, 1, 12, 1, true).translate(0, -0.5, 0).rotateX(-Math.PI / 2).rotateY(Math.PI),
+        new THREE.MeshBasicMaterial({ color: '#fff1d6', transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
+      core.position.z = -E.length * 0.5;
+      g.add(plume, core);
+      g.userData = { plume, core };
+      g.traverse(o => { if (o.isMesh && o.material !== plume.material && o.material !== core.material) o.castShadow = true; });
+      scene.add(g);
+      return g;
+    });
+
+    const pod = new THREE.Group();
+    const shell = new THREE.Mesh(new THREE.SphereGeometry(1, 28, 18), new THREE.MeshStandardMaterial({ color: '#d9c3a5', roughness: 0.35, metalness: 0.4 }));
+    shell.scale.set(Pd.radius * 1.05, Pd.radius * 0.8, Pd.length * 0.55);
+    const canopy = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+      new THREE.MeshStandardMaterial({ color: '#1d2a33', roughness: 0.1, metalness: 0.9 }));
+    canopy.scale.set(0.55, 0.45, 0.8); canopy.position.set(0, 0.45, 0.25);
+    const podStripe = new THREE.Mesh(new THREE.TorusGeometry(1, 0.05, 6, 32), stripe);
+    podStripe.scale.set(Pd.radius * 1.06, Pd.length * 0.4, 1); podStripe.rotation.x = Math.PI / 2;
+    for (const s of [-1, 1]) {
+      const wing = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.08, 0.9), dark);
+      wing.position.set(s * 1.05, 0, -0.5); wing.rotation.z = s * -0.25; pod.add(wing);
+    }
+    pod.add(shell, canopy, podStripe);
+    pod.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    scene.add(pod);
+    this.podMesh = pod;
+
+    // Tether cables
+    const cableGeo = new THREE.CylinderGeometry(0.05, 0.05, 1, 6, 1, true).translate(0, 0.5, 0);
+    this.cables = [0, 1].map(() => {
+      const m = new THREE.Mesh(cableGeo, new THREE.MeshBasicMaterial({ color: '#2b211b' }));
+      scene.add(m); return m;
+    });
+
+    // Energy binder arcs between the engines
+    this.arcs = [0, 1].map(() => {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(14 * 3), 3));
+      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: '#8fe3ff', transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending }));
+      line.frustumCulled = false;
+      scene.add(line); return line;
+    });
+
+    // Dust kicked up by the hover fields
+    const DUST = 500;
+    this.dust = { n: DUST, i: 0, pos: new Float32Array(DUST * 3), vel: new Float32Array(DUST * 3), life: new Float32Array(DUST) };
+    const dg = new THREE.BufferGeometry();
+    dg.setAttribute('position', new THREE.BufferAttribute(this.dust.pos, 3));
+    const puff = document.createElement('canvas'); puff.width = puff.height = 64;
+    const pg = puff.getContext('2d'), grad = pg.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,255,255,0.9)'); grad.addColorStop(1, 'rgba(255,255,255,0)');
+    pg.fillStyle = grad; pg.fillRect(0, 0, 64, 64);
+    this.dustPoints = new THREE.Points(dg, new THREE.PointsMaterial({
+      color: '#e9c49c', size: 1.6, map: new THREE.CanvasTexture(puff), transparent: true, opacity: 0.32, depthWrite: false }));
+    this.dustPoints.frustumCulled = false;
+    this.dust.pos.fill(-1e5);
+    scene.add(this.dustPoints);
+  }
+
+  render(dt, time) {
+    const E = CFG.engine;
+    this.engines.forEach((b, k) => {
+      const m = this.engineMeshes[k];
+      m.position.copy(b.p); m.quaternion.copy(b.q);
+      const t = this.throttle[k], flick = 0.9 + Math.random() * 0.2;
+      const len = 0.25 + t * 3.4 * flick;
+      m.userData.plume.scale.set(0.7 + t * 0.4, 0.7 + t * 0.4, len);
+      m.userData.plume.material.opacity = 0.15 + t * 0.7;
+      m.userData.core.scale.set(1, 1, len * 0.55);
+      m.userData.core.material.opacity = 0.1 + t * 0.85;
+    });
+    this.podMesh.position.copy(this.pod.p); this.podMesh.quaternion.copy(this.pod.q);
+
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), d = new THREE.Vector3();
+    for (let k = 0; k < 2; k++) {
+      this.worldPoint(this.engines[k], this.aRear, a);
+      this.worldPoint(this.pod, this.podAnchors[k], b);
+      d.subVectors(b, a); const len = d.length();
+      const c = this.cables[k];
+      c.position.copy(a); c.scale.set(1, len, 1);
+      c.quaternion.setFromUnitVectors(UP, d.multiplyScalar(1 / len));
+      const taut = Math.min(1, this.tension[k] / 20000);
+      c.material.color.setRGB(0.17 + taut * 0.6, 0.13 + taut * 0.3, 0.1);
+    }
+
+    const anchors = [[this.aFront, this.aFront], [new THREE.Vector3(0, 0, 0.2), new THREE.Vector3(0, 0, 0.2)]];
+    this.arcs.forEach((arc, j) => {
+      this.worldPoint(this.engines[0], anchors[j][0], a);
+      this.worldPoint(this.engines[1], anchors[j][1], b);
+      const arr = arc.geometry.attributes.position.array, n = arr.length / 3;
+      const amp = 0.12 + 0.12 * Math.max(this.throttle[0], this.throttle[1]);
+      for (let i = 0; i < n; i++) {
+        const t = i / (n - 1), j2 = (i === 0 || i === n - 1) ? 0 : amp;
+        arr[i * 3] = a.x + (b.x - a.x) * t + (Math.random() - 0.5) * j2;
+        arr[i * 3 + 1] = a.y + (b.y - a.y) * t + (Math.random() - 0.5) * j2;
+        arr[i * 3 + 2] = a.z + (b.z - a.z) * t + (Math.random() - 0.5) * j2;
+      }
+      arc.geometry.attributes.position.needsUpdate = true;
+      arc.material.opacity = 0.5 + Math.random() * 0.5;
+    });
+
+    // Dust
+    const D = this.dust, spd = this.speed();
+    const spawn = Math.min(3, Math.floor(spd / 18));
+    const vel = this.engines[0].v;
+    for (const h of this.hoverHits) {
+      for (let s = 0; s < spawn; s++) {
+        const i = D.i; D.i = (D.i + 1) % D.n;
+        D.pos[i * 3] = h.x + (Math.random() - 0.5) * 1.5;
+        D.pos[i * 3 + 1] = h.y + 0.2;
+        D.pos[i * 3 + 2] = h.z + (Math.random() - 0.5) * 1.5;
+        D.vel[i * 3] = vel.x * 0.55 + (Math.random() - 0.5) * 8;
+        D.vel[i * 3 + 1] = 1 + Math.random() * 4;
+        D.vel[i * 3 + 2] = vel.z * 0.55 + (Math.random() - 0.5) * 8;
+        D.life[i] = 0.5 + Math.random() * 0.5;
+      }
+    }
+    for (let i = 0; i < D.n; i++) {
+      if (D.life[i] <= 0) continue;
+      D.life[i] -= dt;
+      if (D.life[i] <= 0) { D.pos[i * 3 + 1] = -1e5; continue; }
+      D.pos[i * 3] += D.vel[i * 3] * dt; D.pos[i * 3 + 1] += D.vel[i * 3 + 1] * dt; D.pos[i * 3 + 2] += D.vel[i * 3 + 2] * dt;
+      D.vel[i * 3 + 1] -= 3 * dt;
+    }
+    this.dustPoints.geometry.attributes.position.needsUpdate = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Input: keyboard, gamepad triggers, touch pads
+// ---------------------------------------------------------------------------
+const keys = new Set();
+const touch = [false, false];
+addEventListener('keydown', e => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+  keys.add(e.code);
+  if (e.code === 'KeyR' && !e.repeat) resetToTrack();
+  if (e.code === 'KeyM' && !e.repeat) toggleMute();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => { keys.clear(); touch[0] = touch[1] = false; });
+[['padL', 0], ['padR', 1]].forEach(([id, k]) => {
+  const el = document.getElementById(id);
+  el.addEventListener('pointerdown', e => { touch[k] = true; try { el.setPointerCapture(e.pointerId); } catch {} e.preventDefault(); });
+  const up = () => { touch[k] = false; };
+  el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); el.addEventListener('lostpointercapture', up);
+  el.addEventListener('contextmenu', e => e.preventDefault());
+});
+let inputOverride = null; // set by the debug hook below
+function readInput() {
+  if (inputOverride) return inputOverride;
+  let gl = 0, gr = 0;
+  try {
+    for (const gp of navigator.getGamepads?.() || []) {
+      if (!gp) continue;
+      gl = Math.max(gl, gp.buttons[6]?.value || 0);
+      gr = Math.max(gr, gp.buttons[7]?.value || 0);
+    }
+  } catch {}
+  const kl = keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0;
+  const kr = keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0;
+  return [Math.max(kl, gl, touch[0] ? 1 : 0), Math.max(kr, gr, touch[1] ? 1 : 0)];
+}
+
+// ---------------------------------------------------------------------------
+// Engine sound: one detuned sawtooth per engine, panned left and right
+// ---------------------------------------------------------------------------
+const audio = { ctx: null, muted: false, voices: [] };
+function initAudio() {
+  if (audio.ctx) { audio.ctx.resume?.(); return; }
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const master = ctx.createGain(); master.gain.value = 0.5; master.connect(ctx.destination);
+    audio.voices = [-0.6, 0.6].map(pan => {
+      const osc = ctx.createOscillator(); osc.type = 'sawtooth';
+      const osc2 = ctx.createOscillator(); osc2.type = 'square';
+      const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 600;
+      const gain = ctx.createGain(); gain.gain.value = 0;
+      const p = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+      osc.connect(filt); osc2.connect(filt); filt.connect(gain);
+      if (p) { p.pan.value = pan; gain.connect(p); p.connect(master); } else gain.connect(master);
+      osc.start(); osc2.start();
+      return { osc, osc2, filt, gain };
+    });
+    audio.ctx = ctx; audio.master = master;
+  } catch {}
+}
+function toggleMute() {
+  audio.muted = !audio.muted;
+  if (audio.master) audio.master.gain.value = audio.muted ? 0 : 0.5;
+}
+function updateAudio(racer) {
+  if (!audio.ctx) return;
+  const t = audio.ctx.currentTime, spd = racer.speed();
+  audio.voices.forEach((v, k) => {
+    const th = racer.throttle[k];
+    const f = 48 + th * 60 + spd * 0.7 + k * 1.7;
+    v.osc.frequency.setTargetAtTime(f, t, 0.05);
+    v.osc2.frequency.setTargetAtTime(f * 0.501, t, 0.05);
+    v.filt.frequency.setTargetAtTime(300 + th * 1400 + spd * 6, t, 0.05);
+    v.gain.gain.setTargetAtTime(0.02 + th * 0.07, t, 0.08);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Race state and HUD
+// ---------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+const ui = {
+  lap: $('lap'), time: $('time'), best: $('best'), speed: $('speed'), msg: $('msg'),
+  barL: $('barL'), barR: $('barR'), menu: $('menu'), results: $('results'), hud: $('hud'),
+};
+$('lapsTotal').textContent = CFG.laps;
+const fmt = s => {
+  if (!isFinite(s)) return '–';
+  const m = Math.floor(s / 60), r = s - m * 60;
+  return `${m}:${r.toFixed(3).padStart(6, '0')}`;
+};
+const bestKey = seed => `twin-tether-best-${seed}`;
+const loadBest = seed => { try { const v = parseFloat(localStorage.getItem(bestKey(seed))); return isFinite(v) ? v : Infinity; } catch { return Infinity; } };
+const saveBest = (seed, v) => { try { localStorage.setItem(bestKey(seed), String(v)); } catch {} };
+
+let phys, track, racer;
+const race = { state: 'menu', t: 0, countdown: 0, idx: 0, progress: 0, lapTimes: [], lapStart: 0, best: Infinity, offTime: 0, wrongTime: 0, stuckTime: 0 };
+const START_BACK = 14;
+
+function newTrack(seed) {
+  if (track) track.dispose();
+  track = buildTrack(seed, phys);
+  race.best = loadBest(seed);
+  const info = `Track ${seed} · ${CFG.laps} laps · ${(track.length / 1000).toFixed(1)} km`;
+  $('trackInfo').textContent = info; $('resTrack').textContent = info;
+  toGrid();
+}
+function toGrid() {
+  race.idx = (track.M - START_BACK) % track.M;
+  race.progress = -START_BACK;
+  race.t = 0; race.lapStart = 0; race.lapTimes = [];
+  racer.place(track, race.idx);
+  snapCamera();
+}
+function showMenu() {
+  race.state = 'menu';
+  ui.menu.hidden = false; ui.results.hidden = true;
+  ui.msg.textContent = '';
+  $('startBtn').focus();
+}
+function startRace() {
+  initAudio();
+  ui.menu.hidden = true; ui.results.hidden = true;
+  toGrid();
+  race.state = 'countdown'; race.countdown = 3;
+}
+function finishRace() {
+  race.state = 'finished';
+  $('resTotal').textContent = fmt(race.t);
+  const fastest = Math.min(...race.lapTimes);
+  $('resLaps').innerHTML = race.lapTimes.map((t, i) =>
+    `<span class="lbl">Lap ${i + 1}</span><span class="pb">${t === fastest && t <= race.best ? 'Best' : ''}</span><span class="t">${fmt(t)}</span>`).join('');
+  setTimeout(() => { if (race.state === 'finished') { ui.results.hidden = false; $('againBtn').focus(); } }, 1200);
+}
+function resetToTrack() {
+  if (!racer || race.state === 'menu') return;
+  racer.place(track, race.idx);
+  race.offTime = 0; race.stuckTime = 0;
+}
+$('startBtn').addEventListener('click', startRace);
+$('againBtn').addEventListener('click', startRace);
+const rollTrack = () => { newTrack(1 + Math.floor(Math.random() * 9999)); showMenu(); };
+$('newTrackBtn').addEventListener('click', rollTrack);
+$('newTrackBtn2').addEventListener('click', rollTrack);
+
+function fixedUpdate(dt) {
+  const input = readInput();
+  const live = race.state === 'racing' || race.state === 'finished';
+  racer.update(dt, race.state === 'menu' ? [0, 0] : input, live);
+  phys.step();
+
+  if (race.state === 'countdown') {
+    race.countdown -= dt;
+    if (race.countdown <= 0) { race.state = 'racing'; race.t = 0; race.lapStart = 0; }
+  }
+  if (race.state === 'racing') race.t += dt;
+
+  // Track progress
+  const c = racer.center();
+  const idx = track.nearest(c, race.idx, 60);
+  let delta = idx - race.idx;
+  if (delta > track.M / 2) delta -= track.M;
+  if (delta < -track.M / 2) delta += track.M;
+  race.idx = idx;
+  if (race.state === 'racing' || race.state === 'finished') race.progress += delta;
+  if (race.state === 'racing' && race.progress >= (race.lapTimes.length + 1) * track.M) {
+    const lt = race.t - race.lapStart;
+    race.lapTimes.push(lt); race.lapStart = race.t;
+    if (lt < race.best) { race.best = lt; saveBest(track.seed, lt); }
+    if (race.lapTimes.length >= CFG.laps) finishRace();
+  }
+
+  // Wrong way and off-track recovery
+  const T = track.T[idx];
+  const fwdDot = racer.forward().dot(T);
+  race.wrongTime = (fwdDot < -0.3 && racer.speed() > 6) ? race.wrongTime + dt : 0;
+  const dTrack = c.distanceTo(track.P[idx]);
+  const flipped = racer.up().dot(track.U[idx]) < 0.1;
+  const off = dTrack > CFG.track.width * 1.6 || c.y < track.P[idx].y - 12 || flipped;
+  race.offTime = off ? race.offTime + dt : 0;
+  if (race.offTime > 1.4 && race.state !== 'menu') resetToTrack();
+  // Wedged against a wall: hint first, then put the rig back
+  const pushing = racer.throttle[0] + racer.throttle[1] > 0.8;
+  race.stuckTime = (race.state === 'racing' && pushing && racer.speed() < 3) ? race.stuckTime + dt : 0;
+  if (race.stuckTime > 5) resetToTrack();
+}
+
+// ---------------------------------------------------------------------------
+// Chase camera
+// ---------------------------------------------------------------------------
+const cam = { fwd: new THREE.Vector3(0, 0, 1), up: UP.clone(), target: new THREE.Vector3() };
+function snapCamera() {
+  const c = racer.center(), f = racer.forward();
+  cam.fwd.copy(f); cam.up.copy(UP);
+  camera.position.copy(c).addScaledVector(f, -20).addScaledVector(UP, 6.5);
+  cam.target.copy(c).addScaledVector(f, 10);
+  camera.lookAt(cam.target);
+}
+function updateCamera(dt) {
+  const c = racer.center(), f = racer.forward();
+  const v = racer.engines[0].v;
+  const spd = racer.speed();
+  const dir = f.clone();
+  if (spd > 8) dir.lerp(v.clone().normalize(), 0.35).normalize();
+  cam.fwd.lerp(dir, 1 - Math.exp(-3.5 * dt)).normalize();
+  const tu = track.U[race.idx];
+  cam.up.lerp(UP.clone().lerp(tu, 0.35), 1 - Math.exp(-3 * dt)).normalize();
+  const back = 19 + Math.min(spd / 110, 1) * 3;
+  const desired = c.clone().addScaledVector(cam.fwd, -back).addScaledVector(cam.up, 7.2);
+  camera.position.lerp(desired, 1 - Math.exp(-7 * dt));
+  cam.target.lerp(c.clone().addScaledVector(cam.fwd, 12).addScaledVector(cam.up, 1.2), 1 - Math.exp(-12 * dt));
+  camera.up.copy(cam.up);
+  camera.lookAt(cam.target);
+  const shake = Math.max(0, spd - 60) * 0.0009;
+  camera.position.x += (Math.random() - 0.5) * shake;
+  camera.position.y += (Math.random() - 0.5) * shake;
+  camera.fov = 68 + Math.min(spd / 110, 1) * 16;
+  camera.updateProjectionMatrix();
+  sky.position.copy(camera.position);
+  sun.position.copy(c).addScaledVector(sunDir, 150);
+  sun.target.position.copy(c);
+}
+
+function updateHud() {
+  ui.speed.textContent = Math.round(racer.speed() * 3.6);
+  ui.barL.style.height = (racer.throttle[0] * 100).toFixed(1) + '%';
+  ui.barR.style.height = (racer.throttle[1] * 100).toFixed(1) + '%';
+  const lapNow = Math.min(CFG.laps, race.lapTimes.length + 1);
+  ui.lap.textContent = lapNow;
+  ui.time.textContent = fmt(race.state === 'racing' || race.state === 'finished' ? race.t : 0);
+  ui.best.textContent = fmt(race.best);
+  let msg = '', warn = false;
+  if (race.state === 'countdown') msg = String(Math.ceil(race.countdown));
+  else if (race.state === 'racing' && race.t < 0.8) msg = 'Go';
+  else if (race.state === 'racing' && race.wrongTime > 0.8) { msg = 'Wrong way'; warn = true; }
+  else if (race.state === 'racing' && race.stuckTime > 2.5) { msg = 'Press R'; warn = true; }
+  else if (race.state === 'finished' && ui.results.hidden) msg = 'Finish';
+  if (ui.msg.textContent !== msg) ui.msg.textContent = msg;
+  ui.msg.classList.toggle('warn', warn);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------------------------------------------------------------------------
+// Boot and main loop (fixed 120 Hz physics, render every frame)
+// ---------------------------------------------------------------------------
+let last = performance.now(), acc = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  acc += dt;
+  let steps = 0;
+  while (acc >= CFG.dt && steps < 8) { fixedUpdate(CFG.dt); acc -= CFG.dt; steps++; }
+  if (steps === 8) acc = 0;
+  racer.render(dt, now / 1000);
+  updateCamera(dt);
+  updateHud();
+  updateAudio(racer);
+  renderer.render(scene, camera);
+  window.__tt = {
+    state: race.state, speed: racer.speed(), throttle: racer.throttle.slice(), idx: race.idx,
+    progress: race.progress, laps: race.lapTimes.length, t: race.t, grounded: racer.grounded,
+    tension: racer.tension.slice(), pos: racer.center().toArray(), fwd: racer.forward().toArray(),
+  };
+  requestAnimationFrame(frame);
+}
+
+// Debug hook for automated testing: step the simulation without rendering.
+window.__ttDebug = {
+  get track() { return track; },
+  newTrack(seed) { newTrack(seed); },
+  sim(seconds, controller) {
+    if (race.state !== 'racing') { ui.menu.hidden = true; toGrid(); race.state = 'racing'; }
+    const steps = Math.round(seconds / CFG.dt), log = [];
+    for (let i = 0; i < steps; i++) {
+      inputOverride = controller ? controller(racer, track, race) : [1, 1];
+      fixedUpdate(CFG.dt);
+      if (i % 60 === 0) log.push({ t: +race.t.toFixed(2), spd: +racer.speed().toFixed(1), idx: race.idx, prog: race.progress, laps: race.lapTimes.length, off: +race.offTime.toFixed(2), gnd: racer.grounded, thr: racer.throttle.map(x => +x.toFixed(2)) });
+    }
+    inputOverride = null;
+    return { log, lapTimes: race.lapTimes.slice(), state: race.state };
+  },
+};
+
+(async function boot() {
+  try {
+    phys = await Physics.create();
+  } catch (err) {
+    $('loading').textContent = 'Physics failed to load. Reload the page to try again.';
+    console.error(err);
+    return;
+  }
+  racer = new Racer(phys);
+  newTrack(7);
+  $('loading').hidden = true;
+  ui.hud.hidden = false;
+  showMenu();
+  requestAnimationFrame(t => { last = t; frame(t); });
+})();
+</script>
