@@ -1,0 +1,598 @@
+<title>Derby Ring</title>
+<style>
+/* Layout: full-bleed isometric view. Status top-left, buttons top-right,
+   drive controls along the bottom only while you are driving. */
+:root {
+  --bg: #1d1a17;
+  --ink: #f2ece4;
+  --dim: #a99e92;
+  --accent: #ffcc33;
+  --glass: rgba(29, 26, 23, 0.7);
+  --line: rgba(242, 236, 228, 0.18);
+  --font: "Arial Narrow", "Helvetica Neue", system-ui, sans-serif;
+  color-scheme: dark;
+}
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font);
+  overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none;
+}
+#app { position: fixed; inset: 0; }
+#app canvas { display: block; width: 100%; height: 100%; }
+.hud { position: fixed; inset: 0; pointer-events: none; }
+.stats {
+  position: absolute; top: calc(12px + env(safe-area-inset-top, 0px)); left: 16px;
+  display: grid; gap: 2px; font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+}
+.stats b { font-size: 26px; font-weight: 700; line-height: 1; }
+.stats span { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+.btns {
+  position: absolute; top: calc(12px + env(safe-area-inset-top, 0px)); right: 16px;
+  display: flex; gap: 8px; pointer-events: auto;
+}
+.btn {
+  font: 700 14px/1 var(--font); letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 12px 14px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--glass); color: var(--ink);
+  touch-action: manipulation;
+}
+.btn:active { background: rgba(242,236,228,0.18); }
+.btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.drive {
+  position: absolute; left: 0; right: 0; bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  display: flex; justify-content: space-between; align-items: end; gap: 12px;
+  padding-inline: 12px; pointer-events: none;
+}
+.pad {
+  pointer-events: auto; touch-action: none;
+  width: min(30vw, 130px); height: min(30vw, 130px);
+  border-radius: 18px; border: 1px solid var(--line); background: var(--glass);
+  color: var(--ink); font: 700 30px/1 var(--font);
+}
+.pad.on { background: rgba(255, 204, 51, 0.3); border-color: var(--accent); }
+.pad.rev { width: min(22vw, 96px); height: min(16vw, 70px); font-size: 14px; letter-spacing: 0.08em; }
+#msg {
+  position: absolute; left: 0; right: 0; top: 38%; text-align: center;
+  font: 700 clamp(28px, 8vw, 56px)/1 var(--font); letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--accent); text-shadow: 0 2px 12px rgba(0,0,0,0.8);
+}
+</style>
+
+<div id="app"></div>
+<div class="hud">
+  <div class="stats">
+    <b id="running">20</b><span>Cars running</span>
+    <b id="parts">0</b><span>Parts off</span>
+  </div>
+  <div class="btns">
+    <button class="btn" id="driveBtn" aria-pressed="false">Drive</button>
+    <button class="btn" id="restartBtn">Restart</button>
+  </div>
+  <div id="msg"></div>
+  <div class="drive" id="drive" hidden>
+    <button class="pad" id="padL" aria-label="Steer left">◀</button>
+    <button class="pad rev" id="padRev">Reverse</button>
+    <button class="pad" id="padR" aria-label="Steer right">▶</button>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js';
+import RAPIER from 'https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js';
+
+// ---------------------------------------------------------------------------
+// Tuning
+// ---------------------------------------------------------------------------
+const CFG = {
+  dt: 1 / 60,
+  cars: 20,
+  ring: { inner: 12, outer: 30, wallH: 1.6, segments: 48 },
+  car: {
+    engine: 9000,        // N drive force at full throttle with all wheels on
+    drag: 22,            // quadratic air drag
+    grip: 8,             // how fast sideways sliding is killed (1/s)
+    maxGrip: 1.3,        // friction limit, in g; bigger hits than this slide the car
+    turnRate: 2.0,       // rad/s at full steer once moving
+  },
+  damage: {
+    threshold: 90000,    // N of contact force before a part takes damage (pushing and scraping stay below this)
+    perNewton: 1 / 2000, // hp lost per newton above the threshold (a big ~300 kN hit takes a panel off)
+    partHp: 100,
+    wheelHp: 180,        // wheels stick out at the corners, so they get extra toughness
+    popSpeed: 3,         // m/s outward kick when a part falls off
+  },
+};
+
+// Car parts in car space (+Z forward, +Y up, +X left). size = full extents.
+// core: the pan everything bolts onto; it never comes off.
+const PARTS = [
+  { name: 'core',     shape: 'box',  size: [1.6, 0.3, 3.3],  pos: [0, 0.45, 0],     mass: 420, core: true },
+  { name: 'roof',     shape: 'box',  size: [1.5, 0.55, 1.6], pos: [0, 1.12, -0.25], mass: 60 },
+  { name: 'hood',     shape: 'box',  size: [1.7, 0.3, 1.05], pos: [0, 0.75, 1.15],  mass: 45 },
+  { name: 'trunk',    shape: 'box',  size: [1.7, 0.3, 0.8],  pos: [0, 0.75, -1.35], mass: 35 },
+  { name: 'bumperF',  shape: 'box',  size: [1.9, 0.3, 0.25], pos: [0, 0.5, 1.8],    mass: 30, trim: true },
+  { name: 'bumperR',  shape: 'box',  size: [1.9, 0.3, 0.25], pos: [0, 0.5, -1.8],   mass: 30, trim: true },
+  { name: 'doorL',    shape: 'box',  size: [0.14, 0.5, 1.4], pos: [0.88, 0.8, -0.2], mass: 35 },
+  { name: 'doorR',    shape: 'box',  size: [0.14, 0.5, 1.4], pos: [-0.88, 0.8, -0.2], mass: 35 },
+  { name: 'wheelFL',  shape: 'wheel', r: 0.38, w: 0.3, pos: [0.85, 0.38, 1.2],   mass: 25, wheel: true, front: true },
+  { name: 'wheelFR',  shape: 'wheel', r: 0.38, w: 0.3, pos: [-0.85, 0.38, 1.2],  mass: 25, wheel: true, front: true },
+  { name: 'wheelRL',  shape: 'wheel', r: 0.38, w: 0.3, pos: [0.85, 0.38, -1.2],  mass: 25, wheel: true },
+  { name: 'wheelRR',  shape: 'wheel', r: 0.38, w: 0.3, pos: [-0.85, 0.38, -1.2], mass: 25, wheel: true },
+];
+
+// Collision groups: (membership << 16) | filter
+const G_WORLD = (0x0001 << 16) | 0xffff;
+const G_CAR = (0x0002 << 16) | 0xffff;
+const G_DEBRIS = (0x0004 << 16) | 0xffff;
+
+// ---------------------------------------------------------------------------
+// Renderer, scene, isometric camera
+// ---------------------------------------------------------------------------
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#1d1a17');
+scene.add(new THREE.HemisphereLight('#ffffff', '#3a3028', 1.4));
+const sun = new THREE.DirectionalLight('#ffffff', 1.8);
+sun.position.set(25, 50, 15);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40, near: 1, far: 120 });
+scene.add(sun);
+
+// Marker over the car you're driving
+const marker = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1, 4).rotateX(Math.PI), new THREE.MeshBasicMaterial({ color: '#ffcc33' }));
+marker.visible = false;
+scene.add(marker);
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 500);
+const ISO = new THREE.Vector3(1, 1.1, 1).normalize();
+const view = { target: new THREE.Vector3(), halfH: 30 };
+function fitCamera() {
+  const aspect = window.innerWidth / window.innerHeight;
+  const R = CFG.ring.outer;
+  const want = state.driving ? 13 : Math.max((R * 1.08) / aspect, R * 0.72);
+  view.halfH += (want - view.halfH) * 0.1;
+  camera.left = -view.halfH * aspect; camera.right = view.halfH * aspect;
+  camera.top = view.halfH; camera.bottom = -view.halfH;
+  camera.updateProjectionMatrix();
+}
+
+// ---------------------------------------------------------------------------
+// Physics world and arena (solid colliders, plain meshes)
+// ---------------------------------------------------------------------------
+let world, events, groundHandle;
+const partByCollider = new Map();   // collider handle -> { car, part }
+const debris = [];                  // { body, mesh }
+const cars = [];
+
+function buildArena() {
+  const { inner, outer, wallH, segments } = CFG.ring;
+  const floorMat = new THREE.MeshStandardMaterial({ color: '#57504a', roughness: 1 });
+  const wallMat = new THREE.MeshStandardMaterial({ color: '#c9c1b6', roughness: 0.8 });
+  const islandMat = new THREE.MeshStandardMaterial({ color: '#3b352f', roughness: 1 });
+
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(outer * 2 + 10, 1, outer * 2 + 10), floorMat);
+  floor.position.y = -0.5; floor.receiveShadow = true; scene.add(floor);
+  const g = world.createCollider(RAPIER.ColliderDesc.cuboid(outer + 5, 0.5, outer + 5)
+    .setTranslation(0, -0.5, 0).setFriction(0.6).setCollisionGroups(G_WORLD));
+  groundHandle = g.handle;
+
+  // Ring walls: a polygon of solid boxes for each wall
+  const ringWall = (radius, thick, inward) => {
+    const seg = (2 * Math.PI * radius) / segments * 1.04;
+    for (let i = 0; i < segments; i++) {
+      const a = (i + 0.5) / segments * Math.PI * 2;
+      const r = radius + (inward ? -thick / 2 : thick / 2);
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -a);
+      world.createCollider(RAPIER.ColliderDesc.cuboid(thick / 2, wallH / 2, seg / 2)
+        .setTranslation(x, wallH / 2, z).setRotation(q).setFriction(0.3).setRestitution(0.2)
+        .setCollisionGroups(G_WORLD));
+      const m = new THREE.Mesh(new THREE.BoxGeometry(thick, wallH, seg), wallMat);
+      m.position.set(x, wallH / 2, z); m.quaternion.copy(q);
+      m.castShadow = true; m.receiveShadow = true;
+      scene.add(m);
+    }
+  };
+  ringWall(outer, 1.2, false);
+  ringWall(inner, 1.2, true);
+  const island = new THREE.Mesh(new THREE.CylinderGeometry(inner - 1.2, inner - 1.2, 0.2, 48), islandMat);
+  island.position.y = 0.1; island.receiveShadow = true; scene.add(island);
+}
+
+// ---------------------------------------------------------------------------
+// Cars: one rigid body with a collider per part. A part that takes enough
+// damage is removed from the car and respawned as its own loose body.
+// ---------------------------------------------------------------------------
+const wheelMat = new THREE.MeshStandardMaterial({ color: '#151515', roughness: 0.6 });
+const hubMat = new THREE.MeshStandardMaterial({ color: '#d8d8d8', metalness: 0.9, roughness: 0.25 });
+const trimMat = new THREE.MeshStandardMaterial({ color: '#cfcfcf', metalness: 0.9, roughness: 0.2 });
+const coreMat = new THREE.MeshStandardMaterial({ color: '#2a2a2a', metalness: 0.5, roughness: 0.5 });
+const glassMat = new THREE.MeshStandardMaterial({ color: '#1b2630', metalness: 0.8, roughness: 0.1 });
+
+function partMesh(p, paint) {
+  if (p.shape === 'wheel') {
+    const g = new THREE.Group();
+    const tyre = new THREE.Mesh(new THREE.CylinderGeometry(p.r, p.r, p.w, 16).rotateZ(Math.PI / 2), wheelMat);
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(p.r * 0.5, p.r * 0.5, p.w + 0.02, 12).rotateZ(Math.PI / 2), hubMat);
+    g.add(tyre, hub);
+    return g;
+  }
+  const mat = p.core ? coreMat : p.trim ? trimMat : paint;
+  const m = new THREE.Mesh(new THREE.BoxGeometry(...p.size), mat);
+  if (p.name === 'roof') { // dark window band, die-cast style
+    const band = new THREE.Mesh(new THREE.BoxGeometry(p.size[0] + 0.02, p.size[1] * 0.5, p.size[2] + 0.02), glassMat);
+    band.position.y = -p.size[1] * 0.05;
+    m.add(band);
+  }
+  return m;
+}
+function colliderDesc(p) {
+  const d = p.shape === 'wheel'
+    ? RAPIER.ColliderDesc.ball(p.r)            // wheels are fixed balls; driving is done with forces
+    : RAPIER.ColliderDesc.cuboid(p.size[0] / 2, p.size[1] / 2, p.size[2] / 2);
+  return d.setMass(p.mass);
+}
+
+function makeCar(i, pos, heading, color, isPlayer) {
+  const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), heading);
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(pos.x, 0.1, pos.z).setRotation(q)
+    .setLinearDamping(0.1).setAngularDamping(1.5).setCcdEnabled(true));
+  const paint = new THREE.MeshStandardMaterial({ color, metalness: 0.55, roughness: 0.28 });
+  const group = new THREE.Group();
+  scene.add(group);
+  const car = { i, body, group, paint, isPlayer, parts: [], partsOff: 0, wrecked: false, ai: makeAi(), flipTime: 0 };
+  for (const p of PARTS) {
+    const desc = colliderDesc(p)
+      .setTranslation(...p.pos)
+      .setFriction(p.wheel ? 0.0 : 0.6)
+      .setRestitution(0.15)
+      .setCollisionGroups(G_CAR);
+    if (!p.core) desc.setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(10000);
+    const collider = world.createCollider(desc, body);
+    const mesh = partMesh(p, paint);
+    mesh.position.set(...p.pos);
+    mesh.traverse(o => { if (o.isMesh) { o.castShadow = true; } });
+    group.add(mesh);
+    const part = { def: p, collider, mesh, hp: p.wheel ? CFG.damage.wheelHp : CFG.damage.partHp, attached: true };
+    car.parts.push(part);
+    if (!p.core) partByCollider.set(collider.handle, { car, part });
+  }
+  return car;
+}
+
+function detach(car, part, hitDir) {
+  if (!part.attached) return;
+  part.attached = false;
+  car.partsOff++;
+  state.partsOff++;
+  const c = part.collider;
+  const t = c.translation(), r = c.rotation();
+  const bv = car.body.linvel(), bw = car.body.angvel(), bp = car.body.translation();
+  partByCollider.delete(c.handle);
+  world.removeCollider(c, true);
+  // Loose part keeps the car's velocity at that point, plus a kick outward and up
+  const rel = new THREE.Vector3(t.x - bp.x, t.y - bp.y, t.z - bp.z);
+  const v = new THREE.Vector3(bv.x, bv.y, bv.z).add(new THREE.Vector3(bw.x, bw.y, bw.z).cross(rel));
+  const out = rel.clone().setY(0).normalize();
+  if (hitDir) out.lerp(hitDir, 0.5).normalize();
+  v.addScaledVector(out, CFG.damage.popSpeed).add(new THREE.Vector3(0, 2 + Math.random() * 2, 0));
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(t.x, t.y, t.z).setRotation(r)
+    .setLinvel(v.x, v.y, v.z)
+    .setAngvel({ x: (Math.random() - 0.5) * 8, y: (Math.random() - 0.5) * 8, z: (Math.random() - 0.5) * 8 }));
+  world.createCollider(colliderDesc(part.def).setFriction(0.7).setRestitution(0.25).setCollisionGroups(G_DEBRIS), body);
+  car.group.remove(part.mesh);
+  scene.add(part.mesh);
+  debris.push({ body, mesh: part.mesh });
+  if (debris.length > 400) { // keep the scene light: drop the oldest loose part
+    const old = debris.shift();
+    world.removeRigidBody(old.body);
+    scene.remove(old.mesh);
+  }
+  checkWrecked(car);
+}
+
+function checkWrecked(car) {
+  if (car.wrecked) return;
+  const wheels = car.parts.filter(p => p.def.wheel && p.attached).length;
+  const body = car.parts.filter(p => !p.def.wheel && !p.def.core && p.attached).length;
+  if (wheels <= 1 || body <= 1) wreck(car);
+}
+function wreck(car) {
+  car.wrecked = true;
+  car.paint.color.multiplyScalar(0.35);
+  state.running--;
+}
+
+// ---------------------------------------------------------------------------
+// Driving: arcade forces. Grip and drive scale with the wheels still attached.
+// ---------------------------------------------------------------------------
+const _f = new THREE.Vector3(), _u = new THREE.Vector3(), _r = new THREE.Vector3(), _q = new THREE.Quaternion();
+function drive(car, throttle, steer, dt) {
+  const b = car.body, C = CFG.car;
+  const rq = b.rotation(); _q.set(rq.x, rq.y, rq.z, rq.w);
+  _f.set(0, 0, 1).applyQuaternion(_q); _u.set(0, 1, 0).applyQuaternion(_q);
+  const p = b.translation();
+  const grounded = _u.y > 0.6 && p.y < 1.2;
+  car.flipTime = _u.y < 0.3 ? car.flipTime + dt : 0;
+  if (car.flipTime > 3 && !car.wrecked) wreck(car);
+  if (!grounded) return;
+  const wheels = car.parts.filter(q => q.def.wheel && q.attached);
+  const grip = 0.25 + 0.75 * wheels.length / 4;   // a car on fewer wheels limps, it doesn't stop dead
+  const frontGrip = 0.3 + 0.7 * wheels.filter(q => q.def.front).length / 2;
+  const m = b.mass();
+  const fwd = _f.clone().setY(0).normalize();
+  _r.crossVectors(fwd, _u).setY(0).normalize();
+  const v = b.linvel();
+  const vel = new THREE.Vector3(v.x, 0, v.z);
+  const vf = vel.dot(fwd), vl = vel.dot(_r), speed = vel.length();
+  // drive + drag
+  const F = fwd.clone().multiplyScalar(throttle * C.engine * grip);
+  F.addScaledVector(vel, -C.drag * speed);
+  // kill sideways slide, up to a friction limit (so big hits still shove cars)
+  const latMax = C.maxGrip * 9.81 * m * grip;
+  const lat = Math.max(-latMax, Math.min(latMax, -vl * m * C.grip * grip));
+  F.addScaledVector(_r, lat);
+  b.applyImpulse({ x: F.x * dt, y: 0, z: F.z * dt }, true);
+  // steering: chase a yaw rate
+  const w = b.angvel();
+  const want = steer * C.turnRate * Math.max(-1, Math.min(1, vf / 5)) * frontGrip;
+  const Iy = m * (3.3 * 3.3 + 1.8 * 1.8) / 12;
+  b.applyTorqueImpulse({ x: 0, y: Iy * (want - w.y) * 6 * dt * Math.max(grip, 0.2), z: 0 }, true);
+}
+
+// AI: lap the ring in a chosen direction, swerve at anyone nearby, back out when stuck
+function makeAi() {
+  return {
+    dir: Math.random() < 0.85 ? 1 : -1,
+    lane: 0.25 + Math.random() * 0.5,
+    aggro: 0.3 + Math.random() * 0.5,
+    throttle: 0.8 + Math.random() * 0.2,
+    stuck: 0, reverse: 0, target: null,
+    lunge: 0,                          // seconds left chasing the current target
+    cooldown: 1 + Math.random() * 4,   // seconds before the next lunge
+  };
+}
+function aiControl(car, dt) {
+  const ai = car.ai, b = car.body;
+  const p = b.translation(), v = b.linvel();
+  const rq = b.rotation(); _q.set(rq.x, rq.y, rq.z, rq.w);
+  const fwd = _f.set(0, 0, 1).applyQuaternion(_q).setY(0).normalize().clone();
+  const speed = Math.hypot(v.x, v.z);
+  if (ai.reverse > 0) { ai.reverse -= dt; return [-0.8, ai.reverseSteer]; }
+  ai.stuck = speed < 1.2 ? ai.stuck + dt : 0;
+  if (ai.stuck > 1.0) {
+    ai.stuck = 0; ai.reverse = 1.2; ai.reverseSteer = Math.random() < 0.5 ? -1 : 1;
+    ai.target = null; ai.lunge = 0; ai.cooldown = 2 + Math.random() * 3;
+  }
+  // lap direction: tangent plus a pull back to the chosen lane
+  const { inner, outer } = CFG.ring;
+  const r = Math.hypot(p.x, p.z) || 1;
+  const radial = new THREE.Vector3(p.x / r, 0, p.z / r);
+  const tangent = new THREE.Vector3(-radial.z, 0, radial.x).multiplyScalar(ai.dir);
+  const laneR = inner + 1.5 + (outer - inner - 3) * ai.lane;
+  const want = tangent.clone().addScaledVector(radial, (laneR - r) * 0.15);
+  // Mostly lap; now and then lunge at a car just ahead for a moment
+  ai.cooldown -= dt; ai.lunge -= dt;
+  if (ai.lunge <= 0) ai.target = null;
+  if (!ai.target && ai.cooldown <= 0) {
+    ai.cooldown = 3 + Math.random() * 4;
+    let best = 12;
+    for (const o of cars) {
+      if (o === car || o.wrecked) continue;
+      const op = o.body.translation();
+      const d = Math.hypot(op.x - p.x, op.z - p.z);
+      const toward = new THREE.Vector3(op.x - p.x, 0, op.z - p.z).normalize();
+      if (d > 3 && d < best && toward.dot(fwd) > 0.5) { best = d; ai.target = o; }
+    }
+    if (ai.target && Math.random() < ai.aggro) ai.lunge = 1.5; else ai.target = null;
+  }
+  if (ai.target) {
+    const op = ai.target.body.translation();
+    want.lerp(new THREE.Vector3(op.x - p.x, 0, op.z - p.z).normalize(), 0.85);
+  }
+  want.normalize();
+  const ang = Math.atan2(fwd.x * want.z - fwd.z * want.x, fwd.dot(want)); // + = want is to the right
+  // steer + = turn left (positive yaw); our angle sign is the opposite
+  return [ai.throttle, Math.max(-1, Math.min(1, -ang * 2.2))];
+}
+
+// ---------------------------------------------------------------------------
+// Damage from contact forces
+// ---------------------------------------------------------------------------
+const pendingDetach = [];
+function applyDamage() {
+  events.drainContactForceEvents(e => {
+    const h1 = e.collider1(), h2 = e.collider2();
+    if (h1 === groundHandle || h2 === groundHandle) return;   // landings don't count
+    const force = e.totalForceMagnitude();
+    state.maxForce = Math.max(state.maxForce, force);
+    if (state.forceLog && force > 10000 && (partByCollider.has(h1) || partByCollider.has(h2))) state.forceLog.push(force);
+    const dmg = (force - CFG.damage.threshold) * CFG.damage.perNewton;
+    if (dmg <= 0) return;
+    const dir = e.maxForceDirection();
+    for (const [h, sign] of [[h1, -1], [h2, 1]]) {
+      const hit = partByCollider.get(h);
+      if (!hit || !hit.part.attached) continue;
+      hit.part.hp -= dmg;
+      state.hits++;
+      if (hit.part.hp <= 0) pendingDetach.push([hit.car, hit.part, new THREE.Vector3(dir.x * sign, 0, dir.z * sign)]);
+    }
+  });
+  for (const [car, part, dir] of pendingDetach) detach(car, part, dir);
+  pendingDetach.length = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Game state, input, loop
+// ---------------------------------------------------------------------------
+const state = { running: 0, partsOff: 0, driving: false, hits: 0, maxForce: 0, time: 0, player: 0 };
+const input = { left: false, right: false, rev: false };
+const PALETTE = ['#e63946', '#1d6fd6', '#2a9d8f', '#f4a261', '#8e44ad', '#e76f51', '#3fa34d', '#d62f8b',
+  '#118ab2', '#c0392b', '#6c5ce7', '#00a896', '#ff7f11', '#5d8aa8', '#b5179e', '#7cb518', '#ef476f', '#264653', '#9d4edd'];
+
+function resetWorld() {
+  if (world) {
+    for (const c of cars) scene.remove(c.group);
+    for (const d of debris) scene.remove(d.mesh);
+    world.free();
+  }
+  cars.length = 0; debris.length = 0; partByCollider.clear();
+  scene.children.filter(o => o.isMesh && o !== marker).forEach(o => scene.remove(o));
+  world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+  world.timestep = CFG.dt;
+  events = new RAPIER.EventQueue(true);
+  buildArena();
+  const { inner, outer } = CFG.ring;
+  for (let i = 0; i < CFG.cars; i++) {
+    const a = (i / CFG.cars) * Math.PI * 2;
+    const r = inner + 3 + ((i % 3) / 2) * (outer - inner - 6);
+    const pos = new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r);
+    const isPlayer = i === 0;
+    const car = makeCar(i, pos, 0, isPlayer ? '#ffcc33' : PALETTE[(i - 1) % PALETTE.length], isPlayer);
+    // face along the ring in this car's lap direction (+Z forward; tangent = (-sin a, cos a) * dir)
+    const tx = -Math.sin(a) * car.ai.dir, tz = Math.cos(a) * car.ai.dir;
+    car.body.setRotation(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(tx, tz)), true);
+    cars.push(car);
+  }
+  Object.assign(state, { running: CFG.cars, partsOff: 0, hits: 0, maxForce: 0, time: 0, player: 0 });
+}
+
+function step(dt) {
+  for (const car of cars) {
+    if (car.wrecked) { drive(car, 0, 0, dt); continue; }
+    let throttle, steer;
+    if (car === cars[state.player] && state.driving) {
+      throttle = input.rev ? -0.8 : 1;
+      steer = (input.left ? 1 : 0) - (input.right ? 1 : 0);
+      if (input.rev) steer = -steer; // reversing: steer the way the back of the car goes
+    } else [throttle, steer] = aiControl(car, dt);
+    drive(car, throttle, steer, dt);
+  }
+  world.step(events);
+  applyDamage();
+  state.time += dt;
+}
+
+function syncMeshes() {
+  for (const car of cars) {
+    const t = car.body.translation(), r = car.body.rotation();
+    car.group.position.set(t.x, t.y, t.z);
+    car.group.quaternion.set(r.x, r.y, r.z, r.w);
+  }
+  for (const d of debris) {
+    const t = d.body.translation(), r = d.body.rotation();
+    d.mesh.position.set(t.x, t.y, t.z);
+    d.mesh.quaternion.set(r.x, r.y, r.z, r.w);
+  }
+}
+
+// Input
+const keys = new Set();
+addEventListener('keydown', e => {
+  keys.add(e.code);
+  if (e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => { keys.clear(); input.left = input.right = input.rev = false; });
+function holdButton(id, key) {
+  const el = document.getElementById(id);
+  const on = e => { touchInput[key] = true; el.classList.add('on'); try { el.setPointerCapture(e.pointerId); } catch {} e.preventDefault(); };
+  const off = () => { touchInput[key] = false; el.classList.remove('on'); };
+  el.addEventListener('pointerdown', on);
+  el.addEventListener('pointerup', off); el.addEventListener('pointercancel', off); el.addEventListener('lostpointercapture', off);
+  el.addEventListener('contextmenu', e => e.preventDefault());
+}
+const touchInput = { left: false, right: false, rev: false };
+holdButton('padL', 'left'); holdButton('padR', 'right'); holdButton('padRev', 'rev');
+function readInput() {
+  input.left = touchInput.left || keys.has('ArrowLeft') || keys.has('KeyA');
+  input.right = touchInput.right || keys.has('ArrowRight') || keys.has('KeyD');
+  input.rev = touchInput.rev || keys.has('ArrowDown') || keys.has('KeyS');
+}
+const driveBtn = document.getElementById('driveBtn');
+// Take over a car: keep yours if it still runs, otherwise the healthiest running car
+function pickPlayerCar() {
+  if (!cars[state.player].wrecked) return;
+  const alive = cars.filter(c => !c.wrecked);
+  if (!alive.length) return;
+  alive.sort((a, b) => a.partsOff - b.partsOff);
+  state.player = alive[0].i;
+}
+driveBtn.addEventListener('click', () => {
+  state.driving = !state.driving;
+  if (state.driving) pickPlayerCar();
+  driveBtn.setAttribute('aria-pressed', String(state.driving));
+  driveBtn.textContent = state.driving ? 'Watch' : 'Drive';
+  document.getElementById('drive').hidden = !state.driving;
+});
+document.getElementById('restartBtn').addEventListener('click', () => resetWorld());
+
+const ui = { running: document.getElementById('running'), parts: document.getElementById('parts'), msg: document.getElementById('msg') };
+function updateHud() {
+  ui.running.textContent = state.running;
+  ui.parts.textContent = state.partsOff;
+  const player = cars[state.player];
+  let msg = '';
+  if (state.driving && player?.wrecked) msg = 'Wrecked';
+  else if (state.running <= 1) msg = state.running === 1 ? 'Last car running' : 'All wrecked';
+  if (ui.msg.textContent !== msg) ui.msg.textContent = msg;
+}
+
+addEventListener('resize', () => renderer.setSize(window.innerWidth, window.innerHeight));
+
+let last = performance.now(), acc = 0;
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  acc += dt;
+  let n = 0;
+  while (acc >= CFG.dt && n < 5) { readInput(); step(CFG.dt); acc -= CFG.dt; n++; }
+  if (n === 5) acc = 0;
+  syncMeshes();
+  // camera: whole ring, or follow the yellow car while driving
+  const goal = state.driving ? cars[state.player].group.position : new THREE.Vector3();
+  marker.visible = state.driving;
+  if (state.driving) marker.position.copy(cars[state.player].group.position).add(new THREE.Vector3(0, 3.2 + Math.sin(now / 200) * 0.3, 0));
+  view.target.lerp(goal, state.driving ? 0.12 : 0.05);
+  camera.position.copy(view.target).addScaledVector(ISO, 120);
+  camera.lookAt(view.target);
+  fitCamera();
+  updateHud();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+// Debug hook for automated testing
+window.__dd = {
+  state, cars, CFG,
+  sim(seconds) {
+    const steps = Math.round(seconds / CFG.dt);
+    for (let i = 0; i < steps; i++) step(CFG.dt);
+    syncMeshes();
+    const speeds = cars.map(c => { const v = c.body.linvel(); return Math.hypot(v.x, v.z); });
+    return {
+      t: +state.time.toFixed(1), running: state.running, partsOff: state.partsOff, hits: state.hits,
+      maxForce: Math.round(state.maxForce), debris: debris.length,
+      avgSpeed: +(speeds.reduce((a, b) => a + b, 0) / speeds.length).toFixed(1),
+      moving: speeds.filter(v => v > 3).length,
+      wheelsOff: cars.reduce((n, c) => n + c.parts.filter(p => p.def.wheel && !p.attached).length, 0),
+      escaped: cars.filter(c => { const p = c.body.translation(); return Math.hypot(p.x, p.z) > CFG.ring.outer + 2 || p.y < -2; }).length,
+    };
+  },
+};
+
+(async function boot() {
+  await RAPIER.init();
+  resetWorld();
+  requestAnimationFrame(t => { last = t; frame(t); });
+})();
+</script>
