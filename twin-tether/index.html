@@ -105,16 +105,20 @@ body {
 }
 @media (pointer: coarse) { .pad .key { display: none; } }
 @media (max-height: 500px) { .pad { top: calc(96px + env(safe-area-inset-top, 0px)); } }
-.hudbtn {
+.hudbtns {
   position: absolute; top: calc(12px + env(safe-area-inset-top, 0px)); left: 50%;
   transform: translateX(-50%);
-  pointer-events: auto;
+  display: flex; gap: 8px;
+}
+.hudbtn {
+  pointer-events: auto; white-space: nowrap;
   font: 600 15px/1 var(--body); letter-spacing: 0.06em; text-transform: uppercase;
   padding: 12px 18px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--glass); color: var(--bone);
   touch-action: manipulation;
 }
 .hudbtn:active { background: rgba(245,232,212,0.18); }
+.hudbtn[aria-pressed="true"] { border-color: var(--plasma); color: var(--plasma); }
 
 .panel {
   position: fixed; inset: 0;
@@ -176,7 +180,10 @@ h2 { margin: 0; font-family: var(--display); font-weight: 800; font-size: 40px; 
     <div class="lbl speed-unit">km/h</div>
   </div>
   <div id="msg"></div>
-  <button class="hudbtn" id="resetBtn">Reset</button>
+  <div class="hudbtns">
+    <button class="hudbtn" id="resetBtn">Reset</button>
+    <button class="hudbtn" id="stabBtn" aria-pressed="true">Stab on</button>
+  </div>
   <button class="pad left" id="padL" aria-label="Left engine">
     <div class="bar"><i id="barL"></i><b id="thumbL" data-off></b></div>
     <span class="key">A</span>
@@ -215,6 +222,7 @@ h2 { margin: 0; font-family: var(--display); font-weight: 800; font-size: 40px; 
       <dt>Left engine</dt><dd>Slide the left bar (higher = more power), A or ←, left trigger</dd>
       <dt>Right engine</dt><dd>Slide the right bar, D or →, right trigger</dd>
       <dt>Reset</dt><dd>Button at the top, or R. M mutes the engines.</dd>
+      <dt>Stab</dt><dd>Gyro that holds your heading when both engines match. Toggle at the top, or S.</dd>
     </dl>
     <div class="row">
       <button class="btn go" id="startBtn">Drive</button>
@@ -265,6 +273,17 @@ const CFG = {
     drag: 0.3, keel: 700,
   },
   tether: { length: 7.2, k: 50000, c: 2500 },
+  // Stabiliser (gyro): the throttle difference asks for a turn rate; the gyro
+  // twists the engine pair toward it. Equal throttles = hold heading, which
+  // cancels the pod-swing feedback that otherwise keeps the rig turning.
+  stabiliser: {
+    on: true,
+    maxTurnRate: 1.4,  // rad/s asked for at full left/right difference
+    response: 0.08,    // s, how quickly the turn rate is corrected
+    integral: 0.6,     // s, how quickly it builds up to cancel a steady pull (pod swing)
+    maxTorque: 80000,  // N·m, gyro strength limit
+    podDamp: 1500,     // N per m/s, damps the pod swinging side to side relative to the engines
+  },
   land: { size: 3000, segments: 200, hills: 28, bumps: 3.5, rim: 140 },
 };
 
@@ -497,6 +516,7 @@ class Racer {
     this.engines[1].teleport(at(R.x * E.spacing / 2, R.z * E.spacing / 2, E.hoverHeight), q);
     this.pod.teleport(at(-T.x * podBack, -T.z * podBack, Pd.hoverHeight), q);
     for (const b of [...this.engines, this.pod]) b.hover = null;
+    this.stabI = 0;
     this.throttle = [0, 0];
   }
 
@@ -630,6 +650,35 @@ class Racer {
         e.force(f.clone().multiplyScalar(-B.yawDrag * rel));
       }
     }
+    // Stabiliser: drive the pair's yaw rate toward the rate the throttles ask for.
+    // Applied as equal and opposite forces on the two engines (a pure twist).
+    this.stabTorque = 0;
+    if (!CFG.stabiliser.on || !this.grounded) this.stabI = 0;
+    if (CFG.stabiliser.on && this.grounded) {
+      const S = CFG.stabiliser;
+      const u = this.up(), f = this.forward();
+      const yawRate = (L.w.dot(u) + R.w.dot(u)) / 2;
+      const want = S.maxTurnRate * (this.throttle[1] - this.throttle[0]);  // right engine stronger = turn left (+)
+      const I = 2 * E.mass * (E.spacing / 2) ** 2 + 2 * E.mass * (E.length ** 2) / 12;
+      const err = want - yawRate;
+      this.stabI = Math.max(-S.maxTorque, Math.min(S.maxTorque, (this.stabI || 0) + I * err / (S.response * S.integral) * dt));
+      const torque = Math.max(-S.maxTorque, Math.min(S.maxTorque, I * err / S.response + this.stabI));
+      this.stabTorque = torque;
+      // left engine is at -right of centre; pushing it back and the right one forward yaws left
+      const F = f.clone().multiplyScalar(torque / E.spacing);
+      L.force(F.clone().negate());
+      R.force(F);
+    }
+    // Pod swing damper: resist the pod sliding sideways relative to the engines.
+    // Reaction goes into the engine centres so it doesn't twist the pair.
+    if (CFG.stabiliser.on) {
+      const f = this.forward(), right = f.clone().cross(this.up());
+      const vc = L.v.clone().add(R.v).multiplyScalar(0.5);
+      const rel = this.pod.v.clone().sub(vc).dot(right);
+      const F = right.multiplyScalar(-CFG.stabiliser.podDamp * rel);
+      this.pod.force(F);
+      L.force(F.clone().multiplyScalar(-0.5)); R.force(F.clone().multiplyScalar(-0.5));
+    }
     // Tethers: ropes from each engine's tail to the pod's nose
     for (let k = 0; k < 2; k++) {
       this.tension[k] = this.spring(this.engines[k], this.aRear, this.pod, this.podAnchors[k], Tt.length, Tt.k, Tt.c, true);
@@ -731,6 +780,7 @@ addEventListener('keydown', e => {
   keys.add(e.code);
   if (e.code === 'KeyR' && !e.repeat) resetRig();
   if (e.code === 'KeyM' && !e.repeat) toggleMute();
+  if (e.code === 'KeyS' && !e.repeat) toggleStab();
 });
 addEventListener('keyup', e => keys.delete(e.code));
 addEventListener('blur', () => { keys.clear(); slider[0] = slider[1] = 0; sliderHeld[0] = sliderHeld[1] = false; });
@@ -753,6 +803,13 @@ addEventListener('blur', () => { keys.clear(); slider[0] = slider[1] = 0; slider
   el.addEventListener('contextmenu', e => e.preventDefault());
 });
 document.getElementById('resetBtn').addEventListener('click', () => resetRig());
+const stabBtn = document.getElementById('stabBtn');
+function toggleStab() {
+  CFG.stabiliser.on = !CFG.stabiliser.on;
+  stabBtn.setAttribute('aria-pressed', String(CFG.stabiliser.on));
+  stabBtn.textContent = CFG.stabiliser.on ? 'Stab on' : 'Stab off';
+}
+stabBtn.addEventListener('click', toggleStab);
 let inputOverride = null; // set by the debug hook below
 function readInput() {
   if (inputOverride) return inputOverride;
