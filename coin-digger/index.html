@@ -111,7 +111,7 @@ const CFG = {
   coins: { count: 320, radius: 0.35, half: 0.07, mass: 1, rainEvery: 0.012, rainRadius: 4, rainHeight: 9 },
   digger: {
     mass: 3000, engine: 22000, drag: 400, grip: 10, turnRate: 2.2,
-    armPivot: [0, 1.5, 0.6], armLength: 2.6,
+    armPivot: [0, 1.25, 0.95], armLength: 1.55,     // short chunky arm
     bucketSpeed: 1.4,                             // slider units per second the bucket can move
   },
 };
@@ -271,48 +271,74 @@ function makeDigger(idx, pos, heading, color) {
   const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), heading);
   const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, 0.05, pos.z).setRotation(q)
     .setLinearDamping(0.3).setAngularDamping(2));
-  const parts = [
-    // [hx, hy, hz, x, y, z, color, mass]
-    [1.1, 0.45, 1.6, 0, 0.95, 0, color, 0.5],         // body
-    [0.3, 0.4, 1.75, 1.15, 0.4, 0, '#2a2a2a', 0.15],   // tracks
-    [0.3, 0.4, 1.75, -1.15, 0.4, 0, '#2a2a2a', 0.15],
-    [0.75, 0.6, 0.7, 0, 2.0, -0.6, color, 0.15],       // cab
-    [0.5, 0.25, 0.35, 0, 1.6, -1.55, '#444', 0.05],    // counterweight
-  ];
   const group = new THREE.Group();
   scene.add(group);
-  for (const [hx, hy, hz, x, y, z, col, frac] of parts) {
-    world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setMass(D.mass * frac)
-      .setFriction(col === '#2a2a2a' ? 0 : 0.4).setCollisionGroups(G.digger[idx]), body);
-    const m = new THREE.Mesh(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2), new THREE.MeshStandardMaterial({ color: col, roughness: 0.55, metalness: 0.15 }));
-    m.position.set(x, y, z); m.castShadow = true; group.add(m);
-  }
-  const glass = new THREE.Mesh(new THREE.BoxGeometry(1.52, 0.55, 1.42), new THREE.MeshStandardMaterial({ color: '#1d2b36', metalness: 0.6, roughness: 0.15 }));
-  glass.position.set(0, 2.15, -0.6); group.add(glass);
+  const mat = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.5, metalness: 0.05 });
+  const paint = mat(color), dark = mat('#2b2d33'), white = mat('#f6f3ec');
+  const glass = new THREE.MeshStandardMaterial({ color: '#7fc8e8', roughness: 0.15, metalness: 0.1, emissive: '#1d4a5c', emissiveIntensity: 0.4 });
+  const box = (w, h, dpt, x, y, z, m, parent = group) => {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, dpt), m);
+    b.position.set(x, y, z); b.castShadow = true; parent.add(b); return b;
+  };
 
-  // Arm: visual only (two beams), drawn in chassis space
-  const armMat = new THREE.MeshStandardMaterial({ color: '#3a3a3a', roughness: 0.5 });
+  // Colliders: squat body, cab, and two hidden skids where the wheels are (friction 0, driving is forces)
+  for (const [hx, hy, hz, x, y, z, frac, fric] of [
+    [1.05, 0.4, 1.35, 0, 0.85, 0, 0.55, 0.4],    // body
+    [0.75, 0.65, 0.7, 0, 1.9, -0.45, 0.15, 0.4], // cab
+    [0.3, 0.5, 1.35, 1.2, 0.5, 0, 0.15, 0],      // wheel skids
+    [0.3, 0.5, 1.35, -1.2, 0.5, 0, 0.15, 0],
+  ]) {
+    world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setMass(D.mass * frac)
+      .setFriction(fric).setCollisionGroups(G.digger[idx]), body);
+  }
+
+  // Look: a chunky toy. Body, dark skirt, big cab with wide windows and a cap roof
+  box(2.1, 0.8, 2.7, 0, 0.85, 0, paint);
+  box(2.2, 0.18, 2.8, 0, 0.42, 0, dark);
+  box(1.5, 1.25, 1.35, 0, 1.88, -0.45, paint);
+  box(1.52, 0.62, 1.37, 0, 2.02, -0.45, glass);            // window band all round
+  box(1.42, 0.62, 1.39, 0, 2.02, -0.45, glass);
+  box(1.7, 0.16, 1.55, 0, 2.58, -0.45, white);             // roof cap
+  box(0.32, 0.22, 0.32, 0, 2.77, -0.55, mat(idx === 0 ? '#ff8a1f' : '#3fb7ff'));  // beacon
+  box(0.22, 0.6, 0.22, -0.7, 1.55, -1.1, dark);            // exhaust stack
+  box(1.8, 0.5, 0.35, 0, 0.95, -1.42, dark);               // rear bumper / counterweight
+  // headlight "eyes" on the nose
+  for (const sx of [-1, 1]) {
+    box(0.42, 0.42, 0.06, sx * 0.62, 1.0, 1.37, white);
+    box(0.2, 0.2, 0.04, sx * 0.62, 1.0, 1.41, dark);
+  }
+  // fat octagonal wheels with coloured hubs
+  const wheelGeo = new THREE.CylinderGeometry(0.58, 0.58, 0.5, 8).rotateZ(Math.PI / 2);
+  const hubGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.54, 8).rotateZ(Math.PI / 2);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const w = new THREE.Mesh(wheelGeo, dark); w.position.set(sx * 1.2, 0.58, sz * 0.88); w.castShadow = true; group.add(w);
+    const h = new THREE.Mesh(hubGeo, white); h.position.copy(w.position); group.add(h);
+  }
+
+  // Arm: two short thick beams from the pivot (visual only)
+  const armMat = mat('#3a3d45');
   const arms = [-1, 1].map(sx => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.28, 1).translate(0, 0, 0.5), armMat);
-    m.position.set(sx * 1.0, D.armPivot[1], D.armPivot[2]); m.castShadow = true; group.add(m);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.38, 1).translate(0, 0, 0.5), armMat);
+    m.position.set(sx * 0.85, D.armPivot[1], D.armPivot[2]); m.castShadow = true; group.add(m);
     return m;
   });
+  box(1.9, 0.3, 0.3, 0, D.armPivot[1], D.armPivot[2], armMat);   // pivot crossbar
 
-  // Bucket: kinematic body, open at the front and top. Hinge is the bucket origin.
+  // Bucket: kinematic body, open front and top, thick plates with teeth. Hinge is the origin.
   const bucketBody = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
   const bucketGroup = new THREE.Group(); scene.add(bucketGroup);
-  const bucketMat = new THREE.MeshStandardMaterial({ color: '#c9ccd1', metalness: 0.7, roughness: 0.35 });
-  for (const [hx, hy, hz, x, y, z] of [
-    [1.35, 0.06, 0.7, 0, -0.6, 0.65],    // floor
-    [1.35, 0.42, 0.06, 0, -0.22, -0.02], // back
-    [0.06, 0.36, 0.7, 1.32, -0.3, 0.65], // sides
-    [0.06, 0.36, 0.7, -1.32, -0.3, 0.65],
+  const steel = mat('#b9bec7'), lip = mat('#6c717a');
+  for (const [hx, hy, hz, x, y, z, m] of [
+    [1.3, 0.09, 0.62, 0, -0.58, 0.6, steel],   // floor
+    [1.3, 0.4, 0.09, 0, -0.22, -0.02, steel],  // back
+    [0.09, 0.34, 0.62, 1.24, -0.3, 0.6, lip],  // sides
+    [0.09, 0.34, 0.62, -1.24, -0.3, 0.6, lip],
   ]) {
     world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setFriction(0.9)
       .setCollisionGroups(G.bucket[idx]), bucketBody);
-    const m = new THREE.Mesh(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2), bucketMat);
-    m.position.set(x, y, z); m.castShadow = true; bucketGroup.add(m);
+    box(hx * 2, hy * 2, hz * 2, x, y, z, m, bucketGroup);
   }
+  for (let k = 0; k < 5; k++) box(0.22, 0.12, 0.26, -1.0 + k * 0.5, -0.6, 1.28, lip, bucketGroup);  // teeth
   const d = { idx, body, group, arms, bucketBody, bucketGroup, s: 0, sTarget: 0, ai: { mode: 'seek', t: 0 } };
   placeBucket(d, true);
   return d;
@@ -416,7 +442,7 @@ function aiControl(d, dt) {
   }
   if (ai.mode === 'carry') {                   // curl the bucket and drive to the hole
     d.sTarget = 0.6;
-    const stand = hole.clone().addScaledVector(hole.clone().sub(pos).normalize(), -3.4);
+    const stand = hole.clone().addScaledVector(hole.clone().sub(pos).normalize(), -2.6);
     const to = stand.clone().sub(pos);
     if (to.length() < 1.2 || ai.t > 12) { ai.mode = 'dump'; ai.t = 0; }
     return [to.length() > 0.5 ? to.normalize() : hole.clone().sub(pos).normalize(), Math.min(1, to.length() / 2 + 0.3)];
@@ -567,6 +593,8 @@ function syncScene() {
   }
 }
 function updateCamera() {
+  const o = window.__cd?.camOverride;   // debug: fixed close-up
+  if (o) { camera.position.set(...o.pos); camera.lookAt(...o.target); return; }
   const p = diggers[0].group.position;
   camTarget.lerp(new THREE.Vector3(p.x * 0.5, 0, p.z * 0.7), 0.08);
   const aspect = window.innerWidth / window.innerHeight;
