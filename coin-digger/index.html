@@ -90,7 +90,7 @@ body {
       <em style="bottom:8px">Scoop</em>
       <div class="knob" id="knob"></div>
     </div>
-    <span class="lbl">Bucket</span>
+    <span class="lbl" id="load">Bucket</span>
   </div>
   <div id="msg"></div>
   <div class="panel" id="panel" hidden><button class="btn" id="againBtn">Play again</button></div>
@@ -109,17 +109,24 @@ const CFG = {
   arena: { halfX: 15, halfZ: 20, wallH: 1.5 },
   hole: { size: 5, depth: 3, z: 15 },           // holes at z = +15 (you) and -15 (rival)
   coins: { count: 320, radius: 0.35, half: 0.07, mass: 2, rainEvery: 0.012, rainRadius: 4, rainHeight: 9 },
-  // Solver: more iterations keep coin heaps calm; a softer contact push-out stops
-  // squeezed coins firing out of the bucket. maxCoinUp caps how fast a coin can be launched.
-  solver: { iterations: 8, contactFrequency: 12, maxCoinUp: 3.5 },
+  // Solver: more iterations keep coin heaps calm. Contacts stay stiff (soft ones let
+  // coins sink through the bucket floor). maxCoinUp caps how fast a coin can be launched.
+  solver: { iterations: 8, contactFrequency: 30, maxCoinUp: 3.5 },
+  // Load: coins in the bucket lock to it once it's curled past lockCurl and are
+  // released when it drops below releaseCurl (tipping to dump, or lowering to scoop).
+  // grip nudges loose coins along with the bucket while it's filling.
+  assist: { grip: 20, lockCurl: 0.25, releaseCurl: 0.1 },
   digger: {
-    mass: 3000, engine: 22000, drag: 3400, grip: 10, turnRate: 2.2,   // drag sets top speed ≈ engine / drag ≈ 6.5 m/s
+    mass: 3000, engine: 22000, drag: 3400, grip: 10, turnRate: 1.6, turnResponse: 4,   // drag sets top speed ≈ engine / drag ≈ 6.5 m/s
     armPivot: [0, 1.25, 0.95], armLength: 1.55,     // short chunky arm
     bucketSpeed: 1.0,                             // slider units per second the bucket can move
     armRate: 0.9,                                 // rad/s the arm can lift or lower
     curlRate: 1.3,                                // rad/s the bucket can curl or tip (slow enough to keep coins in)
   },
 };
+
+// Bucket interior in its own frame (hinge at origin): where a coin counts as "in the bucket"
+const BUCKET = { halfWidth: 1.4, zMin: -0.2, zMax: 1.55, yMin: -0.6, yMax: 0.9, centre: [0, -0.1, 0.7] };
 
 // Collision groups: (membership << 16) | filter
 const W = 1, C = 2, DP = 4, BP = 8, BR = 16, DR = 32, L = 64;
@@ -230,6 +237,7 @@ function rain(dt) {
   while (rainTimer <= 0 && rainQueue.length) {
     rainTimer += CFG.coins.rainEvery;
     const c = coins[rainQueue.shift()];
+    if (c.lockedTo) { c.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true); c.lockedTo = null; }
     const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * CFG.coins.rainRadius;
     c.body.setEnabled(true);
     c.body.setTranslation({ x: Math.cos(a) * r, y: CFG.coins.rainHeight + Math.random() * 2, z: Math.sin(a) * r }, true);
@@ -345,20 +353,21 @@ function makeDigger(idx, pos, heading, color) {
     g.rotateY(-Math.PI / 2).translate(x1, 0, 0);     // shape (z, y) extruded along -x, then shifted to span x0..x1
     const mesh = new THREE.Mesh(g, m); mesh.castShadow = true; bucketGroup.add(mesh);
   };
-  const W = 1.2;                                     // inner half-width
+  const W = BUCKET.halfWidth;                        // inner half-width
   for (const [profile, m] of [
-    [[[-0.22, 0.48], [-0.12, 0.48], [-0.03, -0.24], [-0.13, -0.26]], steel],    // slanted back
-    [[[-0.13, -0.26], [-0.03, -0.24], [0.1, -0.48], [0.0, -0.57]], steel],      // heel, upper
-    [[[0.0, -0.57], [0.1, -0.48], [0.36, -0.58], [0.34, -0.68]], steel],        // heel, lower
-    [[[0.34, -0.68], [0.36, -0.58], [1.12, -0.58], [1.12, -0.68]], steel],      // floor
-    [[[1.12, -0.68], [1.12, -0.58], [1.5, -0.695], [1.5, -0.715]], edge],       // cutting edge: a wedge that slides under coins
+    [[[-0.3, 0.75], [-0.14, 0.75], [-0.03, -0.24], [-0.19, -0.28]], steel],     // tall slanted back
+    [[[-0.24, 0.75], [-0.14, 0.75], [0.22, 0.86], [0.18, 0.95]], edge],         // spill guard: lip angled forward over the load
+    [[[-0.19, -0.28], [-0.03, -0.24], [0.1, -0.46], [-0.04, -0.62]], steel],    // heel, upper
+    [[[-0.04, -0.62], [0.1, -0.46], [0.36, -0.55], [0.34, -0.715]], steel],     // heel, lower
+    [[[0.34, -0.715], [0.36, -0.55], [1.4, -0.55], [1.4, -0.715]], steel],     // floor (thick, so coins can't push through)
+    [[[1.4, -0.715], [1.4, -0.55], [1.78, -0.695], [1.78, -0.715]], edge],     // cutting edge: a wedge that slides under coins
   ]) prism(profile, -W, W, m);
-  const side = [[-0.22, 0.48], [0.35, 0.32], [1.5, -0.42], [1.5, -0.715], [0.34, -0.68], [0.0, -0.57], [-0.13, -0.26]];
-  prism(side, W, W + 0.1, edge);
-  prism(side, -W - 0.1, -W, edge);
+  const side = [[-0.3, 0.75], [0.2, 0.92], [0.6, 0.5], [1.78, -0.38], [1.78, -0.715], [0.34, -0.715], [-0.04, -0.62], [-0.19, -0.28]];
+  prism(side, W, W + 0.2, edge);
+  prism(side, -W - 0.2, -W, edge);
   // Teeth: wedges past the cutting edge, flat underneath, sloping up to the lip
-  const tooth = [[1.3, -0.715], [1.3, -0.62], [1.8, -0.705], [1.8, -0.715]];
-  for (let k = 0; k < 5; k++) { const x = -1.0 + k * 0.5; prism(tooth, x - 0.09, x + 0.09, edge); }
+  const tooth = [[1.58, -0.715], [1.58, -0.6], [2.08, -0.705], [2.08, -0.715]];
+  for (let k = 0; k < 6; k++) { const x = -1.15 + k * 0.46; prism(tooth, x - 0.09, x + 0.09, edge); }
   const d = { idx, body, group, arms, bucketBody, bucketGroup, s: 0, sTarget: 0, ai: { mode: 'seek', t: 0 } };
   placeBucket(d, true);
   return d;
@@ -383,9 +392,69 @@ function placeBucket(d, teleport) {
   const local = new THREE.Matrix4().compose(hinge, new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -curl), new THREE.Vector3(1, 1, 1));
   const m = chassisMatrix(d, new THREE.Matrix4()).multiply(local);
   const pos = new THREE.Vector3(), rot = new THREE.Quaternion(); m.decompose(pos, rot, new THREE.Vector3());
+  d.nextBucket = (d.nextBucket || new THREE.Matrix4()).copy(m);   // where the bucket will be after this step
   if (teleport) { d.bucketBody.setTranslation(pos, true); d.bucketBody.setRotation(rot, true); }
   else { d.bucketBody.setNextKinematicTranslation(pos); d.bucketBody.setNextKinematicRotation(rot); }
   d.armAngle = arm;
+}
+
+// Bucket load. While the bucket is low, coins tumble in with full physics (and get
+// a nudge to keep up with it). Once it's curled to carry, coins resting inside are
+// locked to the bucket and move exactly with it: the physics engine can't keep a
+// heap of thin coins inside a code-driven bucket that swings round. When the bucket
+// tips to dump (or lowers to scoop again) they're released as normal coins.
+const _inv = new THREE.Matrix4(), _bp = new THREE.Vector3(), _bq = new THREE.Quaternion(), _lp = new THREE.Vector3();
+const _cw = new THREE.Matrix4(), _cp = new THREE.Vector3(), _cq = new THREE.Quaternion(), ONE = new THREE.Vector3(1, 1, 1);
+function holdLoad(d, dt) {
+  const A = CFG.assist, b = d.bucketBody;
+  const t = b.translation(), r = b.rotation();
+  _bp.set(t.x, t.y, t.z); _bq.set(r.x, r.y, r.z, r.w);
+  const now = new THREE.Matrix4().compose(_bp, _bq, ONE);
+  _inv.copy(now).invert();
+  const centre = new THREE.Vector3(...BUCKET.centre).applyMatrix4(now);
+  const lockNow = d.curl > A.lockCurl, release = d.curl < A.releaseCurl;
+  const k = Math.min(1, A.grip * dt);
+  let load = 0;
+  for (const c of coins) {
+    if (!c.live) continue;
+    if (c.lockedTo === d) {
+      const next = _cw.copy(d.nextBucket).multiply(c.local);
+      if (release) {                                   // let go, keeping the bucket's motion
+        const was = new THREE.Vector3().setFromMatrixPosition(_cw.copy(now).multiply(c.local));
+        const nextPos = new THREE.Vector3().setFromMatrixPosition(next.copy(d.nextBucket).multiply(c.local));
+        const v = nextPos.sub(was).multiplyScalar(1 / dt);
+        c.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+        c.body.setLinvel(v, true); c.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+        c.lockedTo = null;
+      } else {
+        next.decompose(_cp, _cq, _lp);
+        c.body.setNextKinematicTranslation(_cp); c.body.setNextKinematicRotation(_cq);
+        load++;
+        continue;
+      }
+    }
+    if (c.lockedTo) continue;                          // riding in the other digger's bucket
+    const p = c.body.translation();
+    if ((p.x - centre.x) ** 2 + (p.y - centre.y) ** 2 + (p.z - centre.z) ** 2 > 7) continue;
+    _lp.set(p.x, p.y, p.z).applyMatrix4(_inv);
+    if (Math.abs(_lp.x) > BUCKET.halfWidth || _lp.z < BUCKET.zMin || _lp.z > BUCKET.zMax || _lp.y < BUCKET.yMin || _lp.y > BUCKET.yMax) continue;
+    load++;
+    if (lockNow) {                                     // lock this coin to the bucket where it sits
+      const q = c.body.rotation();
+      c.local = new THREE.Matrix4().copy(_inv).multiply(_cw.compose(_cp.set(p.x, p.y, p.z), _cq.set(q.x, q.y, q.z, q.w), ONE));
+      c.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+      c.lockedTo = d;
+      continue;
+    }
+    if (release) continue;
+    // still filling: carry the coin along with the bucket's sideways/forward motion
+    const goal = _cp.copy(_lp).applyMatrix4(d.nextBucket);
+    const tx = (goal.x - p.x) / dt, tz = (goal.z - p.z) / dt;
+    if (tx * tx + tz * tz < 0.01 && c.body.isSleeping()) continue;
+    const v = c.body.linvel();
+    c.body.setLinvel({ x: v.x + (tx - v.x) * k, y: v.y, z: v.z + (tz - v.z) * k }, true);
+  }
+  d.load = load;
 }
 
 // Arcade tracked drive: turn toward a world heading, push forward as it lines up.
@@ -413,7 +482,7 @@ function drive(d, dir, throttle, dt) {
   b.applyImpulse({ x: F.x * dt, y: 0, z: F.z * dt }, true);
   const w = b.angvel();
   const Iy = m * (3.2 * 3.2 + 2.4 * 2.4) / 12;
-  b.applyTorqueImpulse({ x: 0, y: Iy * (want - w.y) * 8 * dt, z: 0 }, true);
+  b.applyTorqueImpulse({ x: 0, y: Iy * (want - w.y) * D.turnResponse * dt, z: 0 }, true);   // softer turn-in so the load isn't flung
   // tipped over: after a moment, set it back on its tracks where it is
   const up = new THREE.Vector3(0, 1, 0).applyQuaternion(_q);
   d.tipTime = up.y < 0.6 ? (d.tipTime || 0) + dt : 0;
@@ -587,6 +656,7 @@ function step(dt) {
     d.s += Math.max(-maxStep, Math.min(maxStep, ds));
     placeBucket(d, false);
   }
+  for (const d of diggers) holdLoad(d, dt);
   world.step();
   for (const c of coins) {                 // no coin gets flung skyward
     if (!c.live || c.body.isSleeping()) continue;
@@ -608,7 +678,7 @@ document.getElementById('againBtn').addEventListener('click', reset);
 // ---------------------------------------------------------------------------
 const ui = {
   you: document.getElementById('scoreYou'), rival: document.getElementById('scoreRival'),
-  timer: document.getElementById('timer'), msg: document.getElementById('msg'), knob,
+  timer: document.getElementById('timer'), msg: document.getElementById('msg'), knob, load: document.getElementById('load'),
 };
 const camTarget = new THREE.Vector3();
 function syncScene() {
@@ -643,6 +713,9 @@ function updateHud() {
   const s = Math.ceil(state.time);
   ui.timer.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   ui.knob.style.bottom = (diggers[0].s * 100).toFixed(1) + '%';
+  const n = diggers[0].load || 0;
+  const loadText = n ? `Load ${n}` : 'Bucket';
+  if (ui.load.textContent !== loadText) ui.load.textContent = loadText;
   let msg = '';
   if (!state.playing && state.countdown > 0) msg = String(Math.ceil(state.countdown));
   else if (state.playing && state.time > CFG.matchTime - 0.8) msg = 'Dig!';
