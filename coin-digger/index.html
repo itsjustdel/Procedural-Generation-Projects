@@ -115,7 +115,7 @@ const CFG = {
   // Load: coins in the bucket lock to it once it's curled past lockCurl and are
   // released when it drops below releaseCurl (tipping to dump, or lowering to scoop).
   // grip nudges loose coins along with the bucket while it's filling.
-  assist: { grip: 20, lockCurl: 0.25, releaseCurl: 0.1 },
+  assist: { grip: 20, lockCurl: 0.25, releaseCurl: 0.1, wallMargin: 0.4 },
   digger: {
     mass: 3000, engine: 22000, drag: 3400, grip: 10, turnRate: 1.6, turnResponse: 4,   // drag sets top speed ≈ engine / drag ≈ 6.5 m/s
     armPivot: [0, 1.25, 0.95], armLength: 1.55,     // short chunky arm
@@ -126,7 +126,7 @@ const CFG = {
 };
 
 // Bucket interior in its own frame (hinge at origin): where a coin counts as "in the bucket"
-const BUCKET = { halfWidth: 1.4, zMin: -0.2, zMax: 1.55, yMin: -0.6, yMax: 0.9, centre: [0, -0.1, 0.7] };
+const BUCKET = { halfWidth: 1.4, zMin: -0.2, zMax: 1.7, yMin: -0.6, yMax: 1.1, centre: [0, 0, 0.75] };
 
 // Collision groups: (membership << 16) | filter
 const W = 1, C = 2, DP = 4, BP = 8, BR = 16, DR = 32, L = 64;
@@ -344,9 +344,9 @@ function makeDigger(idx, pos, heading, color) {
   const bucketBody = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
   const bucketGroup = new THREE.Group(); scene.add(bucketGroup);
   const steel = mat('#b9bec7'), edge = mat('#6c717a');
-  const prism = (profile, x0, x1, m) => {
+  const prism = (profile, x0, x1, m, cx0 = x0, cx1 = x1) => {   // cx0/cx1: collider can be wider than the mesh
     const pts = [];
-    for (const [z, y] of profile) pts.push(x0, y, z, x1, y, z);
+    for (const [z, y] of profile) pts.push(cx0, y, z, cx1, y, z);
     world.createCollider(RAPIER.ColliderDesc.convexHull(new Float32Array(pts)).setFriction(0.8)
       .setCollisionGroups(G.bucket[idx]), bucketBody);
     const g = new THREE.ExtrudeGeometry(new THREE.Shape(profile.map(([z, y]) => new THREE.Vector2(z, y))), { depth: x1 - x0, bevelEnabled: false });
@@ -362,9 +362,9 @@ function makeDigger(idx, pos, heading, color) {
     [[[0.34, -0.715], [0.36, -0.55], [1.4, -0.55], [1.4, -0.715]], steel],     // floor (thick, so coins can't push through)
     [[[1.4, -0.715], [1.4, -0.55], [1.78, -0.695], [1.78, -0.715]], edge],     // cutting edge: a wedge that slides under coins
   ]) prism(profile, -W, W, m);
-  const side = [[-0.3, 0.75], [0.2, 0.92], [0.6, 0.5], [1.78, -0.38], [1.78, -0.715], [0.34, -0.715], [-0.04, -0.62], [-0.19, -0.28]];
-  prism(side, W, W + 0.2, edge);
-  prism(side, -W - 0.2, -W, edge);
+  const side = [[-0.3, 0.75], [0.2, 0.95], [1.1, 0.75], [1.78, 0.35], [1.78, -0.715], [0.34, -0.715], [-0.04, -0.62], [-0.19, -0.28]];   // tall right to the front so heaps can't spill sideways
+  prism(side, W, W + 0.2, edge, W, W + 0.5);       // thick hidden collider outside the plate so coins can't be squeezed through
+  prism(side, -W - 0.2, -W, edge, -W - 0.5, -W);
   // Teeth: wedges past the cutting edge, flat underneath, sloping up to the lip
   const tooth = [[1.58, -0.715], [1.58, -0.6], [2.08, -0.705], [2.08, -0.715]];
   for (let k = 0; k < 6; k++) { const x = -1.15 + k * 0.46; prism(tooth, x - 0.09, x + 0.09, edge); }
@@ -449,10 +449,25 @@ function holdLoad(d, dt) {
     if (release) continue;
     // still filling: carry the coin along with the bucket's sideways/forward motion
     const goal = _cp.copy(_lp).applyMatrix4(d.nextBucket);
-    const tx = (goal.x - p.x) / dt, tz = (goal.z - p.z) / dt;
+    const tx = (goal.x - p.x) / dt, ty = (goal.y - p.y) / dt, tz = (goal.z - p.z) / dt;
     if (tx * tx + tz * tz < 0.01 && c.body.isSleeping()) continue;
     const v = c.body.linvel();
-    c.body.setLinvel({ x: v.x + (tx - v.x) * k, y: v.y, z: v.z + (tz - v.z) * k }, true);
+    const nv = new THREE.Vector3(v.x + (tx - v.x) * k, v.y, v.z + (tz - v.z) * k);
+    // Code wall inside each side plate: a coin pressed into a side is put back
+    // inside, and can't keep moving outward relative to the bucket (the heap
+    // behind it can otherwise squeeze it through the plate).
+    const lim = BUCKET.halfWidth - 0.08;
+    if (Math.abs(_lp.x) > lim) {
+      _lp.x = Math.sign(_lp.x) * lim;
+      const back = _lp.clone().applyMatrix4(now);
+      c.body.setTranslation(back, true);
+    }
+    if (Math.abs(_lp.x) > BUCKET.halfWidth - A.wallMargin) {
+      const side = new THREE.Vector3(Math.sign(_lp.x), 0, 0).applyQuaternion(_bq);
+      const out = nv.x * side.x + nv.y * side.y + nv.z * side.z - (tx * side.x + ty * side.y + tz * side.z);
+      if (out > 0) nv.addScaledVector(side, -out);
+    }
+    c.body.setLinvel(nv, true);
   }
   d.load = load;
 }
@@ -745,6 +760,7 @@ function frame(now) {
 window.__cd = {
   state, CFG, get diggers() { return diggers; }, input,
   coinPositions: () => coins.filter(c => c.live).map(c => { const t = c.body.translation(); return new THREE.Vector3(t.x, t.y, t.z); }),
+  coinById: () => coins.map(c => { if (!c.live) return null; const t = c.body.translation(); return new THREE.Vector3(t.x, t.y, t.z); }),   // stable indices for tracking
   sim(seconds) {
     const t0 = performance.now();
     for (let i = 0; i < Math.round(seconds / CFG.dt); i++) step(CFG.dt);
