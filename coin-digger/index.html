@@ -116,6 +116,9 @@ const CFG = {
   // released when it drops below releaseCurl (tipping to dump, or lowering to scoop).
   // grip nudges loose coins along with the bucket while it's filling.
   assist: { grip: 20, lockCurl: 0.25, releaseCurl: 0.1, wallMargin: 0.4 },
+  // A digger tilted past tiltUp (its up vector's height) is flipped: no drive, drops its
+  // load, rights itself after stun seconds. aiChance: per second, near you and empty-handed.
+  flip: { tiltUp: 0.6, stun: 3, aiChance: 0.35, assist: 24000 },   // assist: N·m roll push while a bucket heaves under a digger
   digger: {
     mass: 3000, engine: 22000, drag: 3400, grip: 10, turnRate: 1.6, turnResponse: 4,   // drag sets top speed ≈ engine / drag ≈ 6.5 m/s
     armPivot: [0, 1.25, 0.95], armLength: 1.55,     // short chunky arm
@@ -134,8 +137,8 @@ const grp = (mem, filter) => (mem << 16) | filter;
 const G = {
   world: grp(W, 0xffff),
   coin: grp(C, W | C | DP | DR | BP | BR),
-  digger: [grp(DP, W | C | DR | L), grp(DR, W | C | DP | L)],
-  bucket: [grp(BP, C), grp(BR, C)],               // buckets only touch coins: a kinematic bucket would shove a digger with unlimited force
+  digger: [grp(DP, W | C | DR | BR | L), grp(DR, W | C | DP | BP | L)],
+  bucket: [grp(BP, C | DR), grp(BR, C | DP)],     // a bucket hits coins and the other digger (never its own); it's code-driven, so it shoves with unstoppable force
   lid: grp(L, DP | DR),                           // diggers drive over the hole, coins fall through
 };
 
@@ -298,12 +301,15 @@ function makeDigger(idx, pos, heading, color) {
   for (const [hx, hy, hz, x, y, z, frac, fric] of [
     [1.05, 0.4, 1.35, 0, 0.85, 0, 0.55, 0.4],    // body
     [0.75, 0.65, 0.7, 0, 1.9, -0.45, 0.15, 0.4], // cab
-    [0.3, 0.5, 1.35, 1.2, 0.5, 0, 0.15, 0],      // wheel skids
-    [0.3, 0.5, 1.35, -1.2, 0.5, 0, 0.15, 0],
   ]) {
     world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setMass(D.mass * frac)
       .setFriction(fric).setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)   // slide over coins instead of grinding on them
       .setCollisionGroups(G.digger[idx]), body);
+  }
+  // Round wheels (balls, friction 0: driving is forces) so a bucket's wedge can slide under them and lever the digger up
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    world.createCollider(RAPIER.ColliderDesc.ball(0.56).setTranslation(sx * 1.2, 0.56, sz * 0.88).setMass(D.mass * 0.075)
+      .setFriction(0).setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min).setCollisionGroups(G.digger[idx]), body);
   }
 
   // Look: a chunky toy. Body, dark skirt, big cab with wide windows and a cap roof
@@ -368,7 +374,7 @@ function makeDigger(idx, pos, heading, color) {
   // Teeth: wedges past the cutting edge, flat underneath, sloping up to the lip
   const tooth = [[1.58, -0.715], [1.58, -0.6], [2.08, -0.705], [2.08, -0.715]];
   for (let k = 0; k < 6; k++) { const x = -1.15 + k * 0.46; prism(tooth, x - 0.09, x + 0.09, edge); }
-  const d = { idx, body, group, arms, bucketBody, bucketGroup, s: 0, sTarget: 0, ai: { mode: 'seek', t: 0 } };
+  const d = { idx, body, group, arms, bucketBody, bucketGroup, s: 0, sTarget: 0, ai: { mode: 'seek', t: 0 }, home: { x: pos.x, z: pos.z, yaw: heading } };
   placeBucket(d, true);
   return d;
 }
@@ -412,7 +418,8 @@ function holdLoad(d, dt) {
   const now = new THREE.Matrix4().compose(_bp, _bq, ONE);
   _inv.copy(now).invert();
   const centre = new THREE.Vector3(...BUCKET.centre).applyMatrix4(now);
-  const lockNow = d.curl > A.lockCurl, release = d.curl < A.releaseCurl;
+  const flipped = (d.tipTime || 0) > 0.15;
+  const lockNow = d.curl > A.lockCurl && !flipped, release = d.curl < A.releaseCurl || flipped;
   const k = Math.min(1, A.grip * dt);
   let load = 0;
   for (const c of coins) {
@@ -472,6 +479,27 @@ function holdLoad(d, dt) {
   d.load = load;
 }
 
+// Flip assist: while this digger's bucket is heaving upward against the other
+// digger, roll the other one away from it, so a committed scoop-and-lift flips it.
+function flipAssist(d, foe, dt) {
+  const lifting = d.arm - (d.prevArm ?? d.arm) > 1e-4;
+  d.prevArm = d.arm;
+  if (!lifting) return;
+  const fp = foe.body.translation(), fr = foe.body.rotation();
+  const foeUp = new THREE.Vector3(0, 1, 0).applyQuaternion(_q.set(fr.x, fr.y, fr.z, fr.w));
+  if (foeUp.y < 0.15) return;                                  // already over: let it fall
+  // is the other digger right at this bucket's mouth?
+  const b = d.bucketBody, t = b.translation(), r = b.rotation();
+  const inv = new THREE.Matrix4().compose(new THREE.Vector3(t.x, t.y, t.z), new THREE.Quaternion(r.x, r.y, r.z, r.w), new THREE.Vector3(1, 1, 1)).invert();
+  const l = new THREE.Vector3(fp.x, fp.y, fp.z).applyMatrix4(inv);
+  if (l.z < -0.5 || l.z > 4.6 || Math.abs(l.x) > 2.8 || l.y < -2 || l.y > 2) return;   // a digger hit end-on has its centre further out
+  const mp = d.body.translation();
+  const push = new THREE.Vector3(fp.x - mp.x, 0, fp.z - mp.z).normalize();
+  const axis = new THREE.Vector3(0, 1, 0).cross(push);           // lifts the near side, rolls it away
+  const T = axis.multiplyScalar(CFG.flip.assist);
+  foe.body.applyTorqueImpulse({ x: T.x * dt, y: T.y * dt, z: T.z * dt }, true);
+}
+
 // Arcade tracked drive: turn toward a world heading, push forward as it lines up.
 function drive(d, dir, throttle, dt) {
   const D = CFG.digger, b = d.body;
@@ -481,6 +509,8 @@ function drive(d, dir, throttle, dt) {
   const v = b.linvel(), vel = new THREE.Vector3(v.x, 0, v.z);
   const m = b.mass();
   let want = 0, push = 0;
+  const upNow = new THREE.Vector3(0, 1, 0).applyQuaternion(_q);
+  if (upNow.y < CFG.flip.tiltUp) { dir = null; }  // wheels off the ground: no drive or steering
   if (dir && throttle > 0.05) {
     const err = Math.atan2(fwd.x * dir.z - fwd.z * dir.x, fwd.dot(dir));      // + = target is to the right (clockwise from above)
     if (Math.abs(err) > 2.2 && d.allowReverse) {                              // target behind: back up toward it
@@ -492,16 +522,29 @@ function drive(d, dir, throttle, dt) {
       push = throttle * Math.max(0, Math.cos(err)) ** 2;
     }
   }
-  const F = fwd.clone().multiplyScalar(push * D.engine).addScaledVector(vel, -D.drag);
-  F.addScaledVector(right, -vel.dot(right) * m * D.grip);
-  b.applyImpulse({ x: F.x * dt, y: 0, z: F.z * dt }, true);
-  const w = b.angvel();
-  const Iy = m * (3.2 * 3.2 + 2.4 * 2.4) / 12;
-  b.applyTorqueImpulse({ x: 0, y: Iy * (want - w.y) * D.turnResponse * dt, z: 0 }, true);   // softer turn-in so the load isn't flung
-  // tipped over: after a moment, set it back on its tracks where it is
+  if (upNow.y >= CFG.flip.tiltUp) {
+    const F = fwd.clone().multiplyScalar(push * D.engine).addScaledVector(vel, -D.drag);
+    F.addScaledVector(right, -vel.dot(right) * m * D.grip);
+    b.applyImpulse({ x: F.x * dt, y: 0, z: F.z * dt }, true);
+    const w = b.angvel();
+    const Iy = m * (3.2 * 3.2 + 2.4 * 2.4) / 12;
+    b.applyTorqueImpulse({ x: 0, y: Iy * (want - w.y) * D.turnResponse * dt, z: 0 }, true);   // softer turn-in so the load isn't flung
+  }
+  // flipped: stunned for a few seconds, then set back on its wheels where it is
   const up = new THREE.Vector3(0, 1, 0).applyQuaternion(_q);
-  d.tipTime = up.y < 0.6 ? (d.tipTime || 0) + dt : 0;
-  if (d.tipTime > 1.5) {
+  d.tipTime = up.y < CFG.flip.tiltUp ? (d.tipTime || 0) + dt : 0;
+  // an unstoppable bucket can launch a digger: cap its speed and spin, and rescue it if it falls out
+  const lv = b.linvel(), av = b.angvel();
+  const sp = Math.hypot(lv.x, lv.y, lv.z), sw = Math.hypot(av.x, av.y, av.z);
+  if (sp > 14) b.setLinvel({ x: lv.x * 14 / sp, y: lv.y * 14 / sp, z: lv.z * 14 / sp }, true);
+  if (sw > 7) b.setAngvel({ x: av.x * 7 / sw, y: av.y * 7 / sw, z: av.z * 7 / sw }, true);
+  if (b.translation().y < -2) {
+    b.setTranslation({ x: d.home.x, y: 0.3, z: d.home.z }, true);
+    b.setRotation({ x: 0, y: Math.sin(d.home.yaw / 2), z: 0, w: Math.cos(d.home.yaw / 2) }, true);
+    b.setLinvel({ x: 0, y: 0, z: 0 }, true); b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    d.tipTime = 0;
+  }
+  if (d.tipTime > CFG.flip.stun) {
     const t = b.translation();
     b.setTranslation({ x: t.x, y: 0.3, z: t.z }, true);
     b.setRotation(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(fwd.x, fwd.z)), true);
@@ -536,6 +579,17 @@ function aiControl(d, dt) {
   const hole = new THREE.Vector3(0, 0, holeZ);
   const r = d.body.rotation(); _q.set(r.x, r.y, r.z, r.w);
   const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(_q).setY(0).normalize();
+  const foe = diggers[1 - d.idx], fp = foe.body.translation();
+  const toFoe = new THREE.Vector3(fp.x - p.x, 0, fp.z - p.z);
+  if (ai.mode === 'seek' && toFoe.length() < 7 && (foe.tipTime || 0) === 0 && Math.random() < dt * CFG.flip.aiChance) {
+    ai.mode = 'ram'; ai.t = 0;
+  }
+  if (ai.mode === 'ram') {                     // bucket down, drive into the other digger, then heave it up
+    const close = toFoe.length() < 4.2;
+    d.sTarget = close && ai.t > 0.6 ? 1 : 0;
+    if (ai.t > 3.5 || (foe.tipTime || 0) > 0.5) { ai.mode = 'seek'; ai.target = null; ai.t = 0; }
+    return [toFoe.normalize(), 1];
+  }
   if (ai.mode === 'seek') {
     d.sTarget = 0;
     if (!ai.target || ai.t > 6) {
@@ -671,6 +725,7 @@ function step(dt) {
     d.s += Math.max(-maxStep, Math.min(maxStep, ds));
     placeBucket(d, false);
   }
+  for (const d of diggers) flipAssist(d, diggers[1 - d.idx], dt);
   for (const d of diggers) holdLoad(d, dt);
   world.step();
   for (const c of coins) {                 // no coin gets flung skyward
@@ -735,6 +790,8 @@ function updateHud() {
   if (!state.playing && state.countdown > 0) msg = String(Math.ceil(state.countdown));
   else if (state.playing && state.time > CFG.matchTime - 0.8) msg = 'Dig!';
   else if (!state.playing && state.result && state.time <= 0) msg = state.result;
+  else if (state.playing && (diggers[0].tipTime || 0) > 0.4) msg = "You're flipped!";
+  else if (state.playing && (diggers[1].tipTime || 0) > 0.4) msg = 'Rival flipped!';
   if (ui.msg.textContent !== msg) ui.msg.textContent = msg;
 }
 addEventListener('resize', () => {
