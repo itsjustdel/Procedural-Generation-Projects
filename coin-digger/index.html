@@ -1,0 +1,626 @@
+<title>Coin Diggers</title>
+<style>
+/* Layout: full-bleed 3D view. Scores and timer across the top; joystick zone on
+   the left, bucket slider on the right. */
+:root {
+  --bg: #20242a;
+  --ink: #f4f1ea;
+  --dim: #a8adb4;
+  --you: #ffc53d;
+  --rival: #ff5a4f;
+  --glass: rgba(24, 27, 32, 0.66);
+  --line: rgba(244, 241, 234, 0.2);
+  --font: "Arial Rounded MT Bold", "Trebuchet MS", system-ui, sans-serif;
+  color-scheme: dark;
+}
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font);
+  overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none;
+}
+#app { position: fixed; inset: 0; }
+#app canvas { display: block; width: 100%; height: 100%; }
+.hud { position: fixed; inset: 0; pointer-events: none; }
+.top {
+  position: absolute; top: calc(10px + env(safe-area-inset-top, 0px)); left: 16px; right: 16px;
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;
+  font-variant-numeric: tabular-nums; text-shadow: 0 2px 6px rgba(0,0,0,0.6);
+}
+.score { display: grid; gap: 2px; }
+.score b { font-size: 34px; line-height: 1; }
+.score span { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+.score.you b { color: var(--you); }
+.score.rival { text-align: right; }
+.score.rival b { color: var(--rival); }
+#timer { font-size: 22px; padding: 6px 12px; border-radius: 10px; background: var(--glass); border: 1px solid var(--line); }
+#stick {
+  position: absolute; width: 120px; height: 120px; margin: -60px 0 0 -60px; border-radius: 50%;
+  border: 2px solid var(--line); background: rgba(24,27,32,0.35);
+}
+#stick i {
+  position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px;
+  border-radius: 50%; background: rgba(244,241,234,0.75);
+}
+.zone { position: absolute; left: 0; top: 90px; bottom: 0; right: 30vw; pointer-events: auto; touch-action: none; }
+.slider {
+  position: absolute; right: 12px; top: calc(110px + env(safe-area-inset-top, 0px));
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  width: min(20vw, 72px); pointer-events: auto; touch-action: none;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+.track {
+  flex: 1; width: 44px; position: relative; border-radius: 14px;
+  background: rgba(24, 27, 32, 0.4); border: 1px solid var(--line);
+}
+.track em {
+  position: absolute; left: 0; right: 0; font: 11px/1 var(--font); letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--dim); text-align: center; font-style: normal;
+}
+.track .knob {
+  position: absolute; left: -6px; right: -6px; height: 22px; margin-bottom: -11px; bottom: 0;
+  border-radius: 8px; background: var(--you); box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+.slider .lbl { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+#msg {
+  position: absolute; left: 16px; right: 16px; top: 34%; text-align: center;
+  font-size: clamp(30px, 9vw, 60px); line-height: 1.05; text-shadow: 0 3px 14px rgba(0,0,0,0.7);
+}
+.panel { position: absolute; left: 0; right: 0; top: 52%; display: flex; justify-content: center; pointer-events: auto; }
+.btn {
+  font: 700 18px/1 var(--font); padding: 14px 22px; border-radius: 12px;
+  border: 0; background: var(--you); color: #2a2000;
+}
+.btn:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+</style>
+
+<div id="app"></div>
+<div class="hud">
+  <div class="top">
+    <div class="score you"><b id="scoreYou">0</b><span>You</span></div>
+    <div id="timer">1:30</div>
+    <div class="score rival"><b id="scoreRival">0</b><span>Rival</span></div>
+  </div>
+  <div class="zone" id="zone"></div>
+  <div id="stick" hidden><i></i></div>
+  <div class="slider" id="slider">
+    <div class="track" id="track">
+      <em style="top:8px">Dump</em>
+      <em style="top:50%">Carry</em>
+      <em style="bottom:8px">Scoop</em>
+      <div class="knob" id="knob"></div>
+    </div>
+    <span class="lbl">Bucket</span>
+  </div>
+  <div id="msg"></div>
+  <div class="panel" id="panel" hidden><button class="btn" id="againBtn">Play again</button></div>
+</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js';
+import RAPIER from 'https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js';
+
+// ---------------------------------------------------------------------------
+// Tuning
+// ---------------------------------------------------------------------------
+const CFG = {
+  dt: 1 / 60,
+  matchTime: 90,
+  arena: { halfX: 15, halfZ: 20, wallH: 1.5 },
+  hole: { size: 5, depth: 3, z: 15 },           // holes at z = +15 (you) and -15 (rival)
+  coins: { count: 320, radius: 0.35, half: 0.07, mass: 1, rainEvery: 0.012, rainRadius: 4, rainHeight: 9 },
+  digger: {
+    mass: 3000, engine: 22000, drag: 400, grip: 10, turnRate: 2.2,
+    armPivot: [0, 1.5, 0.6], armLength: 2.6,
+    bucketSpeed: 1.4,                             // slider units per second the bucket can move
+  },
+};
+
+// Collision groups: (membership << 16) | filter
+const W = 1, C = 2, DP = 4, BP = 8, BR = 16, DR = 32, L = 64;
+const grp = (mem, filter) => (mem << 16) | filter;
+const G = {
+  world: grp(W, 0xffff),
+  coin: grp(C, W | C | DP | DR | BP | BR),
+  digger: [grp(DP, W | C | DR | L), grp(DR, W | C | DP | L)],
+  bucket: [grp(BP, C), grp(BR, C)],               // buckets only touch coins: a kinematic bucket would shove a digger with unlimited force
+  lid: grp(L, DP | DR),                           // diggers drive over the hole, coins fall through
+};
+
+// ---------------------------------------------------------------------------
+// Scene
+// ---------------------------------------------------------------------------
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+app.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#20242a');
+scene.add(new THREE.HemisphereLight('#ffffff', '#3b3f46', 1.3));
+const sun = new THREE.DirectionalLight('#ffffff', 2.0);
+sun.position.set(12, 30, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -25, right: 25, top: 25, bottom: -25, near: 1, far: 80 });
+scene.add(sun);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, 200);
+
+let world, events;
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3();
+
+// ---------------------------------------------------------------------------
+// Arena: ground with two square holes, pits below, walls, and a lid over each
+// hole that only the diggers collide with.
+// ---------------------------------------------------------------------------
+function staticBox(hx, hy, hz, x, y, z, group = G.world, color = null) {
+  world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z)
+    .setFriction(0.6).setCollisionGroups(group));
+  if (color) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2), new THREE.MeshStandardMaterial({ color, roughness: 0.9 }));
+    m.position.set(x, y, z); m.receiveShadow = true; m.castShadow = color !== '#5b8c4a';
+    scene.add(m);
+  }
+}
+function buildArena() {
+  const { halfX: X, halfZ: Z, wallH } = CFG.arena;
+  const { size, depth, z: hz } = CFG.hole, h = size / 2;
+  const ground = '#5b8c4a';
+  // ground slabs (top at y = 0), leaving two holes
+  staticBox(X, 0.5, (Z - hz - h) / 2, 0, -0.5, -(Z + hz + h) / 2, G.world, ground);
+  staticBox(X, 0.5, (Z - hz - h) / 2, 0, -0.5, (Z + hz + h) / 2, G.world, ground);
+  staticBox(X, 0.5, hz - h, 0, -0.5, 0, G.world, ground);
+  for (const s of [-1, 1]) {
+    staticBox((X - h) / 2, 0.5, h, -(X + h) / 2, -0.5, s * hz, G.world, ground);
+    staticBox((X - h) / 2, 0.5, h, (X + h) / 2, -0.5, s * hz, G.world, ground);
+    // pit: floor and walls
+    staticBox(h, 0.25, h, 0, -depth - 0.25, s * hz, G.world, '#1a1c20');
+    staticBox(0.25, depth / 2, h, -h - 0.25, -depth / 2, s * hz, G.world, '#2b2e33');
+    staticBox(0.25, depth / 2, h, h + 0.25, -depth / 2, s * hz, G.world, '#2b2e33');
+    staticBox(h, depth / 2, 0.25, 0, -depth / 2, s * hz - h - 0.25, G.world, '#2b2e33');
+    staticBox(h, depth / 2, 0.25, 0, -depth / 2, s * hz + h + 0.25, G.world, '#2b2e33');
+    staticBox(h, 0.05, h, 0, -0.05, s * hz, G.lid);           // invisible lid for diggers
+    // coloured rim so you can tell whose hole is whose
+    const rim = new THREE.Mesh(new THREE.RingGeometry(h * 1.0, h * 1.18, 4, 1).rotateX(-Math.PI / 2).rotateY(Math.PI / 4),
+      new THREE.MeshBasicMaterial({ color: s > 0 ? '#ffc53d' : '#ff5a4f' }));
+    rim.scale.set(Math.SQRT2, 1, Math.SQRT2);
+    rim.position.set(0, 0.02, s * hz);
+    scene.add(rim);
+  }
+  // walls
+  staticBox(X + 0.5, wallH / 2, 0.5, 0, wallH / 2, -Z - 0.5, G.world, '#8a9099');
+  staticBox(X + 0.5, wallH / 2, 0.5, 0, wallH / 2, Z + 0.5, G.world, '#8a9099');
+  staticBox(0.5, wallH / 2, Z, -X - 0.5, wallH / 2, 0, G.world, '#8a9099');
+  staticBox(0.5, wallH / 2, Z, X + 0.5, wallH / 2, 0, G.world, '#8a9099');
+}
+
+// ---------------------------------------------------------------------------
+// Coins: one dynamic cylinder each, drawn with a single instanced mesh.
+// Coins that fall into a pit score for that hole's owner and pour back in.
+// ---------------------------------------------------------------------------
+const coins = [];
+let coinMesh;
+const rainQueue = [];
+let rainTimer = 0;
+function buildCoins() {
+  const { count, radius, half, mass } = CFG.coins;
+  coinMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(radius, radius, half * 2, 18),
+    new THREE.MeshStandardMaterial({ color: '#ffd23f', metalness: 0.25, roughness: 0.35, emissive: '#7a5200', emissiveIntensity: 0.45 }), count);
+  coinMesh.castShadow = true;
+  coinMesh.frustumCulled = false;
+  scene.add(coinMesh);
+  for (let i = 0; i < count; i++) {
+    const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, -50 - i, 0).setCanSleep(true));
+    body.setEnabled(false);
+    world.createCollider(RAPIER.ColliderDesc.cylinder(half, radius).setMass(mass).setFriction(0.55).setRestitution(0.1)
+      .setCollisionGroups(G.coin), body);
+    coins.push({ body, live: false });
+    rainQueue.push(i);
+  }
+}
+function rain(dt) {
+  rainTimer -= dt;
+  while (rainTimer <= 0 && rainQueue.length) {
+    rainTimer += CFG.coins.rainEvery;
+    const c = coins[rainQueue.shift()];
+    const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * CFG.coins.rainRadius;
+    c.body.setEnabled(true);
+    c.body.setTranslation({ x: Math.cos(a) * r, y: CFG.coins.rainHeight + Math.random() * 2, z: Math.sin(a) * r }, true);
+    c.body.setRotation(new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.random() * 3, Math.random() * 3, 0)), true);
+    c.body.setLinvel({ x: 0, y: -2, z: 0 }, true);
+    c.body.setAngvel({ x: Math.random() * 6 - 3, y: 0, z: Math.random() * 6 - 3 }, true);
+    c.live = true;
+  }
+  if (!rainQueue.length) rainTimer = 0;
+}
+function collectCoins() {
+  const { z: hz, size } = CFG.hole;
+  coins.forEach((c, i) => {
+    if (!c.live) return;
+    const p = c.body.translation();
+    if (p.y > -1) return;
+    if (Math.abs(p.x) < size / 2 + 0.5 && Math.abs(Math.abs(p.z) - hz) < size / 2 + 0.5 && state.playing) {
+      state.score[p.z > 0 ? 0 : 1]++;
+    }
+    c.live = false;
+    c.body.setEnabled(false);
+    rainQueue.push(i);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Diggers: a dynamic tracked chassis, plus a kinematic arm and bucket whose
+// pose is set from the chassis every step. The bucket slider s (0..1) maps to
+// scoop (flat on the ground) -> carry (curled back) -> dump (tipped forward).
+// ---------------------------------------------------------------------------
+function bucketPose(s) {
+  const D = CFG.digger;
+  const lowA = Math.asin((0.66 - D.armPivot[1]) / D.armLength);   // hinge low enough to put the bucket floor on the ground
+  const arm = lowA + (0.95 - lowA) * s;
+  let curl;                                                      // + = front of bucket up (holds coins)
+  if (s < 0.12) curl = 0;
+  else if (s < 0.75) curl = 0.75 * (s - 0.12) / 0.63;
+  else if (s < 0.85) curl = 0.75;
+  else curl = 0.75 - 1.95 * (s - 0.85) / 0.15;                     // tip forward to dump
+  return { arm, curl };
+}
+
+function makeDigger(idx, pos, heading, color) {
+  const D = CFG.digger;
+  const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), heading);
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, 0.05, pos.z).setRotation(q)
+    .setLinearDamping(0.3).setAngularDamping(2));
+  const parts = [
+    // [hx, hy, hz, x, y, z, color, mass]
+    [1.1, 0.45, 1.6, 0, 0.95, 0, color, 0.5],         // body
+    [0.3, 0.4, 1.75, 1.15, 0.4, 0, '#2a2a2a', 0.15],   // tracks
+    [0.3, 0.4, 1.75, -1.15, 0.4, 0, '#2a2a2a', 0.15],
+    [0.75, 0.6, 0.7, 0, 2.0, -0.6, color, 0.15],       // cab
+    [0.5, 0.25, 0.35, 0, 1.6, -1.55, '#444', 0.05],    // counterweight
+  ];
+  const group = new THREE.Group();
+  scene.add(group);
+  for (const [hx, hy, hz, x, y, z, col, frac] of parts) {
+    world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setMass(D.mass * frac)
+      .setFriction(col === '#2a2a2a' ? 0 : 0.4).setCollisionGroups(G.digger[idx]), body);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2), new THREE.MeshStandardMaterial({ color: col, roughness: 0.55, metalness: 0.15 }));
+    m.position.set(x, y, z); m.castShadow = true; group.add(m);
+  }
+  const glass = new THREE.Mesh(new THREE.BoxGeometry(1.52, 0.55, 1.42), new THREE.MeshStandardMaterial({ color: '#1d2b36', metalness: 0.6, roughness: 0.15 }));
+  glass.position.set(0, 2.15, -0.6); group.add(glass);
+
+  // Arm: visual only (two beams), drawn in chassis space
+  const armMat = new THREE.MeshStandardMaterial({ color: '#3a3a3a', roughness: 0.5 });
+  const arms = [-1, 1].map(sx => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.28, 1).translate(0, 0, 0.5), armMat);
+    m.position.set(sx * 1.0, D.armPivot[1], D.armPivot[2]); m.castShadow = true; group.add(m);
+    return m;
+  });
+
+  // Bucket: kinematic body, open at the front and top. Hinge is the bucket origin.
+  const bucketBody = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
+  const bucketGroup = new THREE.Group(); scene.add(bucketGroup);
+  const bucketMat = new THREE.MeshStandardMaterial({ color: '#c9ccd1', metalness: 0.7, roughness: 0.35 });
+  for (const [hx, hy, hz, x, y, z] of [
+    [1.35, 0.06, 0.7, 0, -0.6, 0.65],    // floor
+    [1.35, 0.42, 0.06, 0, -0.22, -0.02], // back
+    [0.06, 0.36, 0.7, 1.32, -0.3, 0.65], // sides
+    [0.06, 0.36, 0.7, -1.32, -0.3, 0.65],
+  ]) {
+    world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setFriction(0.9)
+      .setCollisionGroups(G.bucket[idx]), bucketBody);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2), bucketMat);
+    m.position.set(x, y, z); m.castShadow = true; bucketGroup.add(m);
+  }
+  const d = { idx, body, group, arms, bucketBody, bucketGroup, s: 0, sTarget: 0, ai: { mode: 'seek', t: 0 } };
+  placeBucket(d, true);
+  return d;
+}
+
+function chassisMatrix(d, out) {
+  const t = d.body.translation(), r = d.body.rotation();
+  return out.compose(_v.set(t.x, t.y, t.z), _q.set(r.x, r.y, r.z, r.w), new THREE.Vector3(1, 1, 1));
+}
+// Bucket world pose from the chassis pose and the slider value
+function placeBucket(d, teleport) {
+  const D = CFG.digger;
+  const { arm, curl } = bucketPose(d.s);
+  const hinge = new THREE.Vector3(0, D.armPivot[1] + Math.sin(arm) * D.armLength, D.armPivot[2] + Math.cos(arm) * D.armLength);
+  const local = new THREE.Matrix4().compose(hinge, new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -curl), new THREE.Vector3(1, 1, 1));
+  const m = chassisMatrix(d, new THREE.Matrix4()).multiply(local);
+  const pos = new THREE.Vector3(), rot = new THREE.Quaternion(); m.decompose(pos, rot, new THREE.Vector3());
+  if (teleport) { d.bucketBody.setTranslation(pos, true); d.bucketBody.setRotation(rot, true); }
+  else { d.bucketBody.setNextKinematicTranslation(pos); d.bucketBody.setNextKinematicRotation(rot); }
+  d.armAngle = arm;
+}
+
+// Arcade tracked drive: turn toward a world heading, push forward as it lines up.
+function drive(d, dir, throttle, dt) {
+  const D = CFG.digger, b = d.body;
+  const r = b.rotation(); _q.set(r.x, r.y, r.z, r.w);
+  const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(_q).setY(0).normalize();
+  const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+  const v = b.linvel(), vel = new THREE.Vector3(v.x, 0, v.z);
+  const m = b.mass();
+  let want = 0, push = 0;
+  if (dir && throttle > 0.05) {
+    const err = Math.atan2(fwd.x * dir.z - fwd.z * dir.x, fwd.dot(dir));      // + = target is to the right (clockwise from above)
+    if (Math.abs(err) > 2.2 && d.allowReverse) {                              // target behind: back up toward it
+      const errR = Math.atan2(-fwd.x * dir.z + fwd.z * dir.x, -fwd.dot(dir));
+      want = Math.max(-1, Math.min(1, errR * 2)) * D.turnRate;
+      push = -throttle * 0.7 * Math.max(0, Math.cos(errR));
+    } else {
+      want = -Math.max(-1, Math.min(1, err * 2)) * D.turnRate;
+      push = throttle * Math.max(0, Math.cos(err)) ** 2;
+    }
+  }
+  const F = fwd.clone().multiplyScalar(push * D.engine).addScaledVector(vel, -D.drag);
+  F.addScaledVector(right, -vel.dot(right) * m * D.grip);
+  b.applyImpulse({ x: F.x * dt, y: 0, z: F.z * dt }, true);
+  const w = b.angvel();
+  const Iy = m * (3.2 * 3.2 + 2.4 * 2.4) / 12;
+  b.applyTorqueImpulse({ x: 0, y: Iy * (want - w.y) * 8 * dt, z: 0 }, true);
+  // tipped over: after a moment, set it back on its tracks where it is
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(_q);
+  d.tipTime = up.y < 0.6 ? (d.tipTime || 0) + dt : 0;
+  if (d.tipTime > 1.5) {
+    const t = b.translation();
+    b.setTranslation({ x: t.x, y: 0.3, z: t.z }, true);
+    b.setRotation(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(fwd.x, fwd.z)), true);
+    b.setLinvel({ x: 0, y: 0, z: 0 }, true); b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    d.tipTime = 0;
+  }
+}
+
+// Where the coins are thickest: sample some resting coins, count neighbours,
+// prefer close ones. Ignores coins hugging walls or sitting by a hole.
+function densestCoins(from) {
+  const live = coins.filter(c => c.live).map(c => c.body.translation())
+    .filter(p => p.y < 1 && Math.abs(p.x) < CFG.arena.halfX - 2 && Math.abs(p.z) < CFG.arena.halfZ - 2 && Math.abs(Math.abs(p.z) - CFG.hole.z) > 4);
+  if (!live.length) return null;
+  let best = null, bestScore = -Infinity;
+  for (let k = 0; k < 40; k++) {
+    const c = live[Math.floor(Math.random() * live.length)];
+    let n = 0;
+    for (const o of live) if ((o.x - c.x) ** 2 + (o.z - c.z) ** 2 < 6.25) n++;
+    const score = n - 0.25 * Math.hypot(c.x - from.x, c.z - from.z);
+    if (score > bestScore) { bestScore = score; best = new THREE.Vector3(c.x, 0, c.z); }
+  }
+  return best;
+}
+
+// AI: find coins, scoop through them, carry to its hole, dump, repeat.
+function aiControl(d, dt) {
+  const ai = d.ai; ai.t += dt;
+  const p = d.body.translation();
+  const pos = new THREE.Vector3(p.x, 0, p.z);
+  const holeZ = d.idx === 0 ? CFG.hole.z : -CFG.hole.z;
+  const hole = new THREE.Vector3(0, 0, holeZ);
+  const r = d.body.rotation(); _q.set(r.x, r.y, r.z, r.w);
+  const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(_q).setY(0).normalize();
+  if (ai.mode === 'seek') {
+    d.sTarget = 0;
+    if (!ai.target || ai.t > 6) {
+      ai.target = densestCoins(p); ai.t = 0;
+      if (!ai.target) return [null, 0];
+    }
+    const to = ai.target.clone().sub(pos);
+    if (to.length() < 2.5) { ai.mode = 'scoop'; ai.t = 0; ai.scoopDir = to.clone().normalize(); ai.scoopFrom = pos.clone(); }
+    return [to.normalize(), 1];
+  }
+  if (ai.mode === 'scoop') {                   // plough on through the coins with the bucket down
+    d.sTarget = 0;
+    if (pos.distanceTo(ai.scoopFrom) > 4.5 || ai.t > 2.5) { ai.mode = 'carry'; ai.t = 0; }
+    return [ai.scoopDir, 1];
+  }
+  if (ai.mode === 'carry') {                   // curl the bucket and drive to the hole
+    d.sTarget = 0.6;
+    const stand = hole.clone().addScaledVector(hole.clone().sub(pos).normalize(), -3.4);
+    const to = stand.clone().sub(pos);
+    if (to.length() < 1.2 || ai.t > 12) { ai.mode = 'dump'; ai.t = 0; }
+    return [to.length() > 0.5 ? to.normalize() : hole.clone().sub(pos).normalize(), Math.min(1, to.length() / 2 + 0.3)];
+  }
+  if (ai.mode === 'dump') {                    // face the hole and tip
+    const face = hole.clone().sub(pos).normalize();
+    d.sTarget = fwd.dot(face) > 0.9 ? 1 : 0.6;
+    if (ai.t > 2.2) { ai.mode = 'seek'; ai.target = null; ai.t = 0; }
+    return [face, 0.15];
+  }
+  return [null, 0];
+}
+
+// ---------------------------------------------------------------------------
+// Input: joystick (left), bucket slider (right), keyboard
+// ---------------------------------------------------------------------------
+const input = { dir: null, mag: 0, bucket: 0 };
+const stick = document.getElementById('stick'), stickKnob = stick.querySelector('i');
+const zone = document.getElementById('zone');
+let stickId = null, stickOrigin = null;
+zone.addEventListener('pointerdown', e => {
+  stickId = e.pointerId; stickOrigin = { x: e.clientX, y: e.clientY };
+  stick.style.left = e.clientX + 'px'; stick.style.top = e.clientY + 'px'; stick.hidden = false;
+  try { zone.setPointerCapture(e.pointerId); } catch {}
+  e.preventDefault();
+});
+zone.addEventListener('pointermove', e => {
+  if (e.pointerId !== stickId) return;
+  let dx = e.clientX - stickOrigin.x, dy = e.clientY - stickOrigin.y;
+  const len = Math.hypot(dx, dy), max = 50;
+  if (len > max) { dx *= max / len; dy *= max / len; }
+  stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
+  input.mag = Math.min(1, len / max);
+  input.dir = len > 4 ? new THREE.Vector3(dx, 0, dy).normalize() : null;  // screen right = +X, screen down = +Z
+});
+const stickUp = e => {
+  if (e.pointerId !== stickId) return;
+  stickId = null; stick.hidden = true; stickKnob.style.transform = '';
+  input.dir = null; input.mag = 0;
+};
+zone.addEventListener('pointerup', stickUp); zone.addEventListener('pointercancel', stickUp);
+
+const track = document.getElementById('track'), knob = document.getElementById('knob');
+let sliderHeld = false;
+const setSlider = e => {
+  const r = track.getBoundingClientRect();
+  input.bucket = Math.min(1, Math.max(0, (r.bottom - e.clientY) / r.height));
+};
+const sliderEl = document.getElementById('slider');
+sliderEl.addEventListener('pointerdown', e => { sliderHeld = true; setSlider(e); try { sliderEl.setPointerCapture(e.pointerId); } catch {} e.preventDefault(); });
+sliderEl.addEventListener('pointermove', e => { if (sliderHeld) setSlider(e); });
+const sliderUp = () => { sliderHeld = false; };   // the bucket stays where you leave it
+sliderEl.addEventListener('pointerup', sliderUp); sliderEl.addEventListener('pointercancel', sliderUp);
+
+const keys = new Set();
+addEventListener('keydown', e => { keys.add(e.code); if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault(); });
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+function readKeys(dt) {
+  const x = (keys.has('ArrowRight') || keys.has('KeyD') ? 1 : 0) - (keys.has('ArrowLeft') || keys.has('KeyA') ? 1 : 0);
+  const z = (keys.has('ArrowDown') || keys.has('KeyS') ? 1 : 0) - (keys.has('ArrowUp') || keys.has('KeyW') ? 1 : 0);
+  if (x || z) { input.dir = new THREE.Vector3(x, 0, z).normalize(); input.mag = 1; input.keyDrive = true; }
+  else if (input.keyDrive) { input.dir = null; input.mag = 0; input.keyDrive = false; }
+  if (keys.has('KeyQ') || keys.has('KeyR')) input.bucket = Math.min(1, input.bucket + dt * 0.8);
+  if (keys.has('KeyE') || keys.has('KeyF')) input.bucket = Math.max(0, input.bucket - dt * 0.8);
+}
+
+// ---------------------------------------------------------------------------
+// Game
+// ---------------------------------------------------------------------------
+const state = { score: [0, 0], time: CFG.matchTime, playing: false, countdown: 0, autoPlayer: false };
+let diggers = [];
+
+function reset() {
+  if (world) {
+    world.free();
+    scene.children.filter(o => !o.isLight).forEach(o => scene.remove(o));
+    scene.add(sun);
+  }
+  coins.length = 0; rainQueue.length = 0;
+  world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+  world.timestep = CFG.dt;
+  buildArena();
+  buildCoins();
+  diggers = [
+    makeDigger(0, new THREE.Vector3(-4, 0, 9), Math.PI, '#ffc53d'),
+    makeDigger(1, new THREE.Vector3(4, 0, -9), 0, '#ff5a4f'),
+  ];
+  diggers[0].allowReverse = true;
+  input.bucket = 0;
+  Object.assign(state, { score: [0, 0], time: CFG.matchTime, playing: false, countdown: 3 });
+  document.getElementById('panel').hidden = true;
+}
+
+function step(dt) {
+  rain(dt);
+  if (!state.playing && state.countdown > 0) {
+    state.countdown -= dt;
+    if (state.countdown <= 0) state.playing = true;
+  } else if (state.playing) {
+    state.time -= dt;
+    if (state.time <= 0) { state.time = 0; state.playing = false; endMatch(); }
+  }
+  const live = state.playing;
+  for (const d of diggers) {
+    let dir = null, mag = 0;
+    if (d.idx === 0 && !state.autoPlayer) { dir = input.dir; mag = input.mag; d.sTarget = input.bucket; }
+    else [dir, mag] = aiControl(d, dt);
+    if (!live) { dir = null; mag = 0; }
+    drive(d, dir, mag, dt);
+    const ds = d.sTarget - d.s, maxStep = CFG.digger.bucketSpeed * dt;
+    d.s += Math.max(-maxStep, Math.min(maxStep, ds));
+    placeBucket(d, false);
+  }
+  world.step();
+  collectCoins();
+}
+
+function endMatch() {
+  const [a, b] = state.score;
+  state.result = a > b ? `You win ${a}–${b}` : a < b ? `Rival wins ${b}–${a}` : `Draw ${a}–${b}`;
+  document.getElementById('panel').hidden = false;
+}
+document.getElementById('againBtn').addEventListener('click', reset);
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+const ui = {
+  you: document.getElementById('scoreYou'), rival: document.getElementById('scoreRival'),
+  timer: document.getElementById('timer'), msg: document.getElementById('msg'), knob,
+};
+const camTarget = new THREE.Vector3();
+function syncScene() {
+  coins.forEach((c, i) => {
+    if (!c.live) { _m.makeScale(0, 0, 0); coinMesh.setMatrixAt(i, _m); return; }
+    const t = c.body.translation(), r = c.body.rotation();
+    _m.compose(_v.set(t.x, t.y, t.z), _q.set(r.x, r.y, r.z, r.w), new THREE.Vector3(1, 1, 1));
+    coinMesh.setMatrixAt(i, _m);
+  });
+  coinMesh.instanceMatrix.needsUpdate = true;
+  for (const d of diggers) {
+    const t = d.body.translation(), r = d.body.rotation();
+    d.group.position.set(t.x, t.y, t.z); d.group.quaternion.set(r.x, r.y, r.z, r.w);
+    const bt = d.bucketBody.translation(), br = d.bucketBody.rotation();
+    d.bucketGroup.position.set(bt.x, bt.y, bt.z); d.bucketGroup.quaternion.set(br.x, br.y, br.z, br.w);
+    for (const a of d.arms) { a.rotation.x = -d.armAngle; a.scale.z = CFG.digger.armLength; }
+  }
+}
+function updateCamera() {
+  const p = diggers[0].group.position;
+  camTarget.lerp(new THREE.Vector3(p.x * 0.5, 0, p.z * 0.7), 0.08);
+  const aspect = window.innerWidth / window.innerHeight;
+  const h = aspect < 0.8 ? 40 : 30;                       // further back on a tall phone screen
+  camera.position.set(camTarget.x, h, camTarget.z + h * 0.55);
+  camera.lookAt(camTarget);
+}
+function updateHud() {
+  ui.you.textContent = state.score[0];
+  ui.rival.textContent = state.score[1];
+  const s = Math.ceil(state.time);
+  ui.timer.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  ui.knob.style.bottom = (diggers[0].s * 100).toFixed(1) + '%';
+  let msg = '';
+  if (!state.playing && state.countdown > 0) msg = String(Math.ceil(state.countdown));
+  else if (state.playing && state.time > CFG.matchTime - 0.8) msg = 'Dig!';
+  else if (!state.playing && state.result && state.time <= 0) msg = state.result;
+  if (ui.msg.textContent !== msg) ui.msg.textContent = msg;
+}
+addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+let last = performance.now(), acc = 0;
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  readKeys(dt);
+  acc += dt;
+  let n = 0;
+  while (acc >= CFG.dt && n < 4) { step(CFG.dt); acc -= CFG.dt; n++; }
+  if (n === 4) acc = 0;
+  syncScene(); updateCamera(); updateHud();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+// Debug hook for automated testing
+window.__cd = {
+  state, CFG, get diggers() { return diggers; }, input,
+  sim(seconds) {
+    const t0 = performance.now();
+    for (let i = 0; i < Math.round(seconds / CFG.dt); i++) step(CFG.dt);
+    syncScene();
+    const live = coins.filter(c => c.live);
+    return { score: state.score.slice(), time: +state.time.toFixed(1), live: live.length,
+      escaped: live.filter(c => { const p = c.body.translation(); return Math.abs(p.x) > CFG.arena.halfX + 1 || Math.abs(p.z) > CFG.arena.halfZ + 1; }).length,
+      ai: diggers.map(d => d.ai.mode), msPerSimSec: +((performance.now() - t0) / seconds).toFixed(0) };
+  },
+};
+
+(async function boot() {
+  await RAPIER.init();
+  reset();
+  requestAnimationFrame(t => { last = t; frame(t); });
+})();
+</script>
